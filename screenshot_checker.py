@@ -1,5 +1,4 @@
-"""
-Screen shot tekshiruvi - OpenCVsiz, faqat oddiy tekshiruvlar
+"""Screen shot tekshiruvi - OpenCVsiz, faqat oddiy tekshiruvlar
 Renderda muammosiz ishlaydi
 """
 import os
