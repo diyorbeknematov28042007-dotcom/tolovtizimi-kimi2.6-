@@ -641,8 +641,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ASOSIY FUNKSIYA ==========
 
+# ========== ASOSIY FUNKSIYA ==========
+
 def main():
-    """Botni ishga tushirish"""
+    """Botni ishga tushirish (Webhook + Polling)"""
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Komandalar
@@ -681,9 +683,32 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     application.add_handler(MessageHandler(filters.VIDEO, handle_message))
 
-    print("🤖 Bot ishga tushdi...")
-    print("🔍 Avtomatik screen shot tekshiruvi yoqildi!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Webhook yoki Polling tanlash
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+    PORT = int(os.environ.get("PORT", "10000"))
+
+    # Render avtomatik HTTPS bilan ishlaydi, shuning uchun SSL kerak emas
+    if WEBHOOK_URL or RENDER_EXTERNAL_URL:
+        # === WEBHOOK MODE (Render uchun) ===
+        webhook_url = WEBHOOK_URL or f"{RENDER_EXTERNAL_URL}/webhook"
+        print("🌐 Webhook mode ishga tushdi...")
+        print(f"🔗 Webhook URL: {webhook_url}")
+        print(f"📡 Port: {PORT}")
+        print("🔍 Avtomatik screen shot tekshiruvi yoqildi!")
+
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=webhook_url,
+            url_path="webhook",
+            allowed_updates=Update.ALL_TYPES
+        )
+    else:
+        # === POLLING MODE (local test uchun) ===
+        print("🤖 Polling mode ishga tushdi...")
+        print("🔍 Avtomatik screen shot tekshiruvi yoqildi!")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
