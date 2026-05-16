@@ -13,7 +13,8 @@ from telegram.ext import (
 )
 from config import (
     BOT_TOKEN, ADMIN_ID, PAYMENT_GROUP_ID, DEFAULT_LANGUAGE,
-    LANGUAGES, get_text, get_button
+    LANGUAGES, get_text, get_button, get_site_names, get_site_count,
+    STATE_SITE_SELECTION, STATE_WAITING_ORDER_NUMBER, STATE_WAITING_SCREENSHOT
 )
 from database import db
 from payments import payment_service
@@ -33,9 +34,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Conversation states
-WAITING_ORDER_NUMBER = 1
-WAITING_SCREENSHOT = 2
+# Conversation states (config.py dan import qilinadi)
+# STATE_SITE_SELECTION = 0
+# STATE_WAITING_ORDER_NUMBER = 1
+# STATE_WAITING_SCREENSHOT = 2
 
 # Avtomatik tasdiqlash chegarasi (85% ishonch)
 AUTO_APPROVE_THRESHOLD = 0.85
@@ -107,9 +109,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== TO'LOV TASDIQLASH ==========
 
 async def payment_confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """To'lov tasdiqlashni boshlash"""
+    """To'lov tasdiqlashni boshlash - avval sayt tanlash"""
     query = update.callback_query
     await query.answer()
+
+    user_id = query.from_user.id
+    lang = get_user_lang(user_id)
+    sites = get_site_names()
+
+    # Agar faqat 1 ta sayt bo'lsa, to'g'ridan-to'g'ri buyurtma raqamini so'raymiz
+    if len(sites) <= 1:
+        context.user_data['site_index'] = 0
+        await query.edit_message_text(
+            get_text(lang, "enter_order_number"),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]
+            ])
+        )
+        context.user_data['state'] = STATE_WAITING_ORDER_NUMBER
+        return
+
+    # Bir nechta sayt bo'lsa, tanlash menyusi
+    keyboard = []
+    for index, name in sites:
+        keyboard.append([InlineKeyboardButton(f"🌐 {name}", callback_data=f'site_{index}')])
+    keyboard.append([InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')])
+
+    await query.edit_message_text(
+        get_text(lang, "select_site"),
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    context.user_data['state'] = STATE_SITE_SELECTION
+
+async def process_site_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saytni tanlash"""
+    if context.user_data.get('state') != STATE_SITE_SELECTION:
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    site_index = int(query.data.split('_')[1])
+    context.user_data['site_index'] = site_index
 
     lang = get_user_lang(query.from_user.id)
 
@@ -120,19 +162,22 @@ async def payment_confirm_start(update: Update, context: ContextTypes.DEFAULT_TY
         ])
     )
 
-    context.user_data['state'] = WAITING_ORDER_NUMBER
+    context.user_data['state'] = STATE_WAITING_ORDER_NUMBER
 
 async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Buyurtma raqamini qabul qilish"""
-    if context.user_data.get('state') != WAITING_ORDER_NUMBER:
+    if context.user_data.get('state') != STATE_WAITING_ORDER_NUMBER:
         return
 
     user_id = update.effective_user.id
     lang = get_user_lang(user_id)
     order_number = update.message.text.strip()
 
-    # Buyurtmani tekshirish
-    order_data = await payment_service.check_order(order_number)
+    # Tanlangan sayt bo'yicha tekshirish
+    site_index = context.user_data.get('site_index', 0)
+    from payments import PaymentService
+    current_payment_service = PaymentService(site_index)
+    order_data = await current_payment_service.check_order(order_number)
 
     if not order_data['found']:
         await update.message.reply_text(
@@ -154,10 +199,10 @@ async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(text)
 
-    # To'lovni bazaga qo'shish (site_index=0, site_name bilan)
+    # To'lovni bazaga qo'shish (tanlangan sayt bilan)
     payment_id = db.add_payment(
         user_id=user_id,
-        site_index=0,
+        site_index=site_index,
         site_name=order_data.get('site_name', "Asosiy sayt"),
         order_number=order_number,
         amount=order_data['amount']
@@ -175,11 +220,11 @@ async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(screenshot_msg)
 
-    context.user_data['state'] = WAITING_SCREENSHOT
+    context.user_data['state'] = STATE_WAITING_SCREENSHOT
 
 async def process_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Screen shotni qabul qilish va AVTO TEKSHIRISH"""
-    if context.user_data.get('state') != WAITING_SCREENSHOT:
+    if context.user_data.get('state') != STATE_WAITING_SCREENSHOT:
         return
 
     user_id = update.effective_user.id
@@ -627,9 +672,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Foydalanuvchi state tekshirish
     state = context.user_data.get('state')
-    if state == WAITING_ORDER_NUMBER:
+    if state == STATE_WAITING_ORDER_NUMBER:
         await process_order_number(update, context)
-    elif state == WAITING_SCREENSHOT:
+    elif state == STATE_WAITING_SCREENSHOT:
         await process_screenshot(update, context)
     else:
         # Noma'lum xabar
@@ -653,6 +698,7 @@ def main():
 
     # Callback query handlerlar
     application.add_handler(CallbackQueryHandler(payment_confirm_start, pattern='^payment_confirm$'))
+    application.add_handler(CallbackQueryHandler(process_site_selection, pattern='^site_'))
     application.add_handler(CallbackQueryHandler(about_me, pattern='^about_me$'))
     application.add_handler(CallbackQueryHandler(payment_history, pattern='^payment_history$'))
     application.add_handler(CallbackQueryHandler(settings, pattern='^settings$'))
@@ -686,7 +732,9 @@ def main():
     # Webhook yoki Polling tanlash
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
     RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
-    PORT = int(os.environ.get("PORT", "10000"))
+    PORT_STR = os.environ.get("PORT", "10000")
+    PORT = int(PORT_STR) if PORT_STR and PORT_STR.strip() else 10000
+    WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "D1yoRBeK")
 
     # Render avtomatik HTTPS bilan ishlaydi, shuning uchun SSL kerak emas
     if WEBHOOK_URL or RENDER_EXTERNAL_URL:
@@ -702,6 +750,7 @@ def main():
             port=PORT,
             webhook_url=webhook_url,
             url_path="webhook",
+            secret_token=WEBHOOK_SECRET,
             allowed_updates=Update.ALL_TYPES
         )
     else:
