@@ -1,5 +1,4 @@
-"""
-Asosiy bot - Maxsus to'lov boti (Avtomatik screen shot tekshiruvi bilan)
+"""Asosiy bot - Maxsus to'lov boti (Avtomatik screen shot tekshiruvi bilan)
 Deploy: Render Web Service
 Database: Neon PostgreSQL
 """
@@ -150,8 +149,8 @@ async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['order_amount'] = order_data['amount']
 
     text = get_text(lang, "order_found",
-                   amount=f"{order_data['amount']:,.0f}",
-                   status=order_data['status'])
+                    amount=f"{order_data['amount']:,.0f}",
+                    status=order_data['status'])
 
     await update.message.reply_text(text)
 
@@ -160,20 +159,15 @@ async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['payment_id'] = payment_id
 
     # Screen shot kutilmoqda
-    await update.message.reply_text(
-        "📸 Iltimos, to'lov chekining screen shotini yuboring:
+    screenshot_msg = """📸 Iltimos, to'lov chekining screen shotini yuboring:
 
-"
-        "💡 Bot avtomatik tekshiradi:
-"
-        "   ✅ Rasm haqiqiyligi
-"
-        "   ✅ Summa to'g'riligi
-"
-        "   ✅ Vaqt belgisi
-"
-        "   ✅ Tranzaksiya ID"
-    )
+💡 Bot avtomatik tekshiradi:
+ ✅ Rasm haqiqiyligi
+ ✅ Summa to'g'riligi
+ ✅ Vaqt belgisi
+ ✅ Tranzaksiya ID"""
+
+    await update.message.reply_text(screenshot_msg)
 
     context.user_data['state'] = WAITING_SCREENSHOT
 
@@ -221,7 +215,7 @@ async def process_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # AVTO TEKSHIRISH
         check_result = await screenshot_checker.check_screenshot(
-            tmp_path, 
+            tmp_path,
             expected_amount=order_amount,
             order_number=order_number
         )
@@ -230,26 +224,24 @@ async def process_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
         os.unlink(tmp_path)
 
         # Tekshirish natijasini ko'rsatish
+        validity = "✅ Haqiqiy" if check_result['is_valid'] else "⚠️ Shubhali"
+        recommendation = check_result.get('recommendation', 'Admin tekshiruvini kuting')
+
         status_text = f"""📊 Tekshirish natijasi:
 
 🎯 Ishonch darajasi: {check_result['confidence']*100:.0f}%
-{"✅ Haqiqiy" if check_result['is_valid'] else "⚠️ Shubhali"}
+{validity}
 
 📋 Topilgan ma'lumotlar:
 💰 Summa: {check_result['extracted_data'].get('found_amount', 'N/A')}
 🕐 Vaqt: {check_result['extracted_data'].get('found_time', 'N/A')}
 🆔 Tranzaksiya ID: {check_result['extracted_data'].get('transaction_id', 'N/A')}
 
-{"✅ Avtomatik tasdiqlandi!" if check_result['is_valid'] else check_result['recommendation']}"""
+{"✅ Avtomatik tasdiqlandi!" if check_result['is_valid'] else recommendation}"""
 
         if check_result['issues']:
-            status_text += "
-
-⚠️ Muammolar:
-"
-            for issue in check_result['issues']:
-                status_text += f"   • {issue}
-"
+            issues_text = "\n".join([f" • {issue}" for issue in check_result['issues']])
+            status_text += f"\n\n⚠️ Muammolar:\n{issues_text}"
 
         await update.message.reply_text(status_text)
 
@@ -261,51 +253,46 @@ async def process_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Saytda tasdiqlash
             await payment_service.confirm_payment(order_number)
 
-            await update.message.reply_text(
-                "🎉 To'lovingiz avtomatik tasdiqlandi!
+            auto_msg = f"""🎉 To'lovingiz avtomatik tasdiqlandi!
 
-"
-                "✅ Endi saytdan davom etishingiz mumkin.
+✅ Endi saytdan davom etishingiz mumkin.
+📋 Buyurtma: #{order_number}
+💰 Summa: {order_amount:,.0f} so'm"""
 
-"
-                "📋 Buyurtma: #{order_number}
-"
-                "💰 Summa: {amount:,.0f} so'm".format(
-                    order_number=order_number,
-                    amount=order_amount
-                )
-            )
+            await update.message.reply_text(auto_msg)
 
             # Guruhga xabar (ma'lumot uchun)
             if PAYMENT_GROUP_ID:
                 user = update.effective_user
-                await context.bot.send_message(
-                    chat_id=PAYMENT_GROUP_ID,
-                    text=f"""✅ AVTO TASDIQLANDI!
+                group_auto_msg = f"""✅ AVTO TASDIQLANDI!
 
-👤 Foydalanuvchi: {user.first_name} (@{user.username or 'Noma\'lum'})
+👤 Foydalanuvchi: {user.first_name} (@{user.username or "Noma'lum"})
 🆔 ID: {user.id}
 📋 Buyurtma: #{order_number}
 💰 Summa: {order_amount:,.0f} so'm
 🎯 Ishonch: {check_result['confidence']*100:.0f}%
 🤖 Avtomatik tasdiq"""
+
+                await context.bot.send_message(
+                    chat_id=PAYMENT_GROUP_ID,
+                    text=group_auto_msg
                 )
 
         else:
             # Admin tekshiruviga yuborish
-            await update.message.reply_text(
-                "⏳ Screen shot admin tekshiruviga yuborildi.
-"
-                "Natijasi tez orada xabar qilinadi."
-            )
+            pending_msg = """⏳ Screen shot admin tekshiruviga yuborildi.
+Natijasi tez orada xabar qilinadi."""
+
+            await update.message.reply_text(pending_msg)
 
             # Guruhga yuborish (admin tekshirishi uchun)
             if PAYMENT_GROUP_ID:
                 user = update.effective_user
+                issues_str = "\n".join(check_result['issues']) if check_result['issues'] else "Yo'q"
 
                 group_text = f"""⚠️ TEKSHIRUV TALAB ETILADI!
 
-👤 Foydalanuvchi: {user.first_name} (@{user.username or 'Noma\'lum'})
+👤 Foydalanuvchi: {user.first_name} (@{user.username or "Noma'lum"})
 🆔 ID: {user.id}
 📋 Buyurtma: #{order_number}
 💰 Summa: {order_amount:,.0f} so'm
@@ -318,7 +305,7 @@ async def process_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
 🆔 Tranzaksiya ID: {check_result['extracted_data'].get('transaction_id', 'N/A')}
 
 ⚠️ Muammolar:
-{chr(10).join(check_result['issues']) if check_result['issues'] else 'Yo\'q'}"""
+{issues_str}"""
 
                 # Screen shotni yuborish
                 if file_type == 'photo':
@@ -391,10 +378,7 @@ async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Xabar yuborishda xato: {e}")
 
     await query.edit_message_text(
-        f"✅ To'lov tasdiqlandi!
-
-📋 Buyurtma: #{payment['order_number']}
-💰 Summa: {payment['amount']:,.0f} so'm"
+        f"✅ To'lov tasdiqlandi!\n\n📋 Buyurtma: #{payment['order_number']}\n💰 Summa: {payment['amount']:,.0f} so'm"
     )
 
 async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,13 +410,10 @@ async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Xabar yuborishda xato: {e}")
 
     await query.edit_message_text(
-        f"❌ To'lov rad etildi!
-
-📋 Buyurtma: #{payment['order_number']}
-💰 Summa: {payment['amount']:,.0f} so'm"
+        f"❌ To'lov rad etildi!\n\n📋 Buyurtma: #{payment['order_number']}\n💰 Summa: {payment['amount']:,.0f} so'm"
     )
 
-# ========== MEN HAqIMDA ==========
+# ========== MEN HAQIMDA ==========
 
 async def about_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Men haqimda"""
@@ -447,19 +428,12 @@ async def about_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not sites:
         text = "📭 Hali ro'yxatdan o'tgan saytlar mavjud emas."
     else:
-        text = "👤 Sizning saytlaringiz:
-
-"
+        text = "👤 Sizning saytlaringiz:\n\n"
         for i, site in enumerate(sites, 1):
-            text += f"{i}. {site['site_name']}
-"
-            text += f"   🔗 {site['site_url']}
-"
-            text += f"   👤 Login: {site['login']}
-"
-            text += f"   🔑 Parol: {site['password']}
-
-"
+            text += f"{i}. {site['site_name']}\n"
+            text += f" 🔗 {site['site_url']}\n"
+            text += f" 👤 Login: {site['login']}\n"
+            text += f" 🔑 Parol: {site['password']}\n\n"
 
     keyboard = [[InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -479,20 +453,14 @@ async def payment_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not payments:
         text = get_text(lang, "no_history")
     else:
-        text = "📋 To'lovlar tarixi:
-
-"
+        text = "📋 To'lovlar tarixi:\n\n"
         for payment in payments:
             status = "✅ Tasdiqlandi" if payment['status'] == 'approved' else \
-                     "⏳ Kutilmoqda" if payment['status'] == 'pending' else "❌ Rad etildi"
+                "⏳ Kutilmoqda" if payment['status'] == 'pending' else "❌ Rad etildi"
             auto = "🤖 Avto" if payment.get('approved_by') == 0 else "👤 Admin"
-            text += f"📋 #{payment['order_number']} - {payment['amount']:,.0f} so'm
-"
-            text += f"   📅 {payment['created_at'].strftime('%d.%m.%Y %H:%M')}
-"
-            text += f"   📊 {status} ({auto})
-
-"
+            text += f"📋 #{payment['order_number']} - {payment['amount']:,.0f} so'm\n"
+            text += f" 📅 {payment['created_at'].strftime('%d.%m.%Y %H:%M')}\n"
+            text += f" 📊 {status} ({auto})\n\n"
 
     keyboard = [[InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -556,7 +524,7 @@ async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lang = get_user_lang(query.from_user.id)
 
-    about_text = db.get_setting('about_text') or 'Bot haqida ma\'lumot'
+    about_text = db.get_setting('about_text') or "Bot haqida ma'lumot"
     about_media = db.get_setting('about_media')
 
     keyboard = [[InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]]
@@ -589,9 +557,7 @@ async def questions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     questions_text = db.get_setting('questions_text') or 'Savollaringiz bormi?'
     contact = db.get_setting('contact_admin') or '@admin'
 
-    text = f"{questions_text}
-
-📞 Admin bilan bog'lanish: {contact}"
+    text = f"{questions_text}\n\n📞 Admin bilan bog'lanish: {contact}"
 
     keyboard = [
         [InlineKeyboardButton(get_button(lang, "contact_admin"), url=f'https://t.me/{contact.replace("@", "")}')],
