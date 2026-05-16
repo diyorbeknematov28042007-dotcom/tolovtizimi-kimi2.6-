@@ -5,6 +5,11 @@ Bir nechta sayt bilan ishlash
 import os
 import json
 
+# ========== CONVERSATION STATES ==========
+STATE_SITE_SELECTION = 0
+STATE_WAITING_ORDER_NUMBER = 1
+STATE_WAITING_SCREENSHOT = 2
+
 # ========== ASOSIY SOZLAMALAR ==========
 
 def safe_int(env_val, default=0):
@@ -132,3 +137,11 @@ def get_site_by_index(index):
     if 0 <= index < len(SITES):
         return SITES[index]
     return None
+
+def get_site_names():
+    """Barcha sayt nomlarini ro'yxatini olish"""
+    return [(i, site["name"]) for i, site in enumerate(SITES)]
+
+def get_site_count():
+    """Saytlar soni"""
+    return len(SITES)
