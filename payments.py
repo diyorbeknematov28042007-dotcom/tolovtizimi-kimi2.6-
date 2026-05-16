@@ -3,7 +3,7 @@ To'lov tizimi — bir nechta sayt bilan ishlash
 Tanlangan saytga qarab tekshiradi
 """
 import aiohttp
-from config import SITES, get_site_by_index
+from config import get_site_by_index
 
 class PaymentService:
     def __init__(self, site_index=0):
@@ -11,6 +11,7 @@ class PaymentService:
         self.api_url = self.site["url"] if self.site else ""
         self.api_key = self.site["key"] if self.site else ""
         self.site_name = self.site["name"] if self.site else "Noma'lum"
+        self.site_index = site_index
 
     async def check_order(self, order_number):
         """Saytdan buyurtma tekshirish"""
@@ -35,7 +36,8 @@ class PaymentService:
                             "status": data.get("status"),
                             "customer_name": data.get("customer_name"),
                             "customer_phone": data.get("customer_phone"),
-                            "site_name": self.site_name
+                            "site_name": self.site_name,
+                            "site_index": self.site_index
                         }
                     else:
                         return {"found": False}
@@ -80,7 +82,8 @@ class PaymentService:
                 "status": order["status"],
                 "customer_name": "Test",
                 "customer_phone": "+998901234567",
-                "site_name": self.site_name
+                "site_name": self.site_name,
+                "site_index": self.site_index
             }
 
         if order_number.isdigit() and len(order_number) >= 4:
@@ -91,10 +94,11 @@ class PaymentService:
                 "status": "pending",
                 "customer_name": "Foydalanuvchi",
                 "customer_phone": "+998901234567",
-                "site_name": self.site_name
+                "site_name": self.site_name,
+                "site_index": self.site_index
             }
 
         return {"found": False}
 
-# Asosiy instance — bot.py dan import qilinadi
+# Asosiy instance — faqat birinchi sayt uchun default
 payment_service = PaymentService()
