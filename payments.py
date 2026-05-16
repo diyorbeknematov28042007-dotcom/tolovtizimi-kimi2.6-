@@ -95,3 +95,6 @@ class PaymentService:
             }
 
         return {"found": False}
+
+# Asosiy instance — bot.py dan import qilinadi
+payment_service = PaymentService()
