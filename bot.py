@@ -154,8 +154,14 @@ async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(text)
 
-    # To'lovni bazaga qo'shish
-    payment_id = db.add_payment(user_id, order_number, order_data['amount'])
+    # To'lovni bazaga qo'shish (site_index=0, site_name bilan)
+    payment_id = db.add_payment(
+        user_id=user_id,
+        site_index=0,
+        site_name=order_data.get('site_name', "Asosiy sayt"),
+        order_number=order_number,
+        amount=order_data['amount']
+    )
     context.user_data['payment_id'] = payment_id
 
     # Screen shot kutilmoqda
