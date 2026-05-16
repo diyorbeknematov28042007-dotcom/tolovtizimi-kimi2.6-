@@ -1,6 +1,4 @@
-"""
-Admin funksiyalari
-"""
+"""Admin funksiyalari"""
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import ADMIN_ID, get_text, get_button
@@ -65,9 +63,7 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.user_data['admin_state'] = 'broadcast'
     await query.edit_message_text(
-        "📢 Yuboriladigan xabarni kiriting (matn, rasm, video yoki hujjat):
-
-"
+        "📢 Yuboriladigan xabarni kiriting (matn, rasm, video yoki hujjat):\n\n"
         "Eslatma: Xabar barcha foydalanuvchilarga yuboriladi."
     )
 
@@ -86,7 +82,7 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_message(user['telegram_id'], update.message.text)
             elif update.message.photo:
                 await context.bot.send_photo(
-                    user['telegram_id'], 
+                    user['telegram_id'],
                     update.message.photo[-1].file_id,
                     caption=update.message.caption
                 )
@@ -108,11 +104,8 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
             failed_count += 1
 
     await update.message.reply_text(
-        f"📢 Xabar yuborildi!
-
-"
-        f"✅ Muvaffaqiyatli: {sent_count}
-"
+        f"📢 Xabar yuborildi!\n\n"
+        f"✅ Muvaffaqiyatli: {sent_count}\n"
         f"❌ Xato: {failed_count}"
     )
 
@@ -160,8 +153,7 @@ Batafsil:"""
 
     for payment in payments:
         status_emoji = "✅" if payment['status'] == 'approved' else "⏳" if payment['status'] == 'pending' else "❌"
-        text += f"
-{status_emoji} #{payment['order_number']} - {payment['amount']:,.0f} so'm"
+        text += f"\n{status_emoji} #{payment['order_number']} - {payment['amount']:,.0f} so'm"
 
     keyboard = [[InlineKeyboardButton("⬅️ Orqaga", callback_data='admin_report')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -189,8 +181,7 @@ Batafsil:"""
 
     for payment in payments:
         status_emoji = "✅" if payment['status'] == 'approved' else "⏳" if payment['status'] == 'pending' else "❌"
-        text += f"
-{status_emoji} #{payment['order_number']} - {payment['amount']:,.0f} so'm"
+        text += f"\n{status_emoji} #{payment['order_number']} - {payment['amount']:,.0f} so'm"
 
     keyboard = [[InlineKeyboardButton("⬅️ Orqaga", callback_data='admin_report')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -207,14 +198,8 @@ async def admin_set_welcome_start(update: Update, context: ContextTypes.DEFAULT_
     current_text, current_links = db.get_welcome_data()
 
     await query.edit_message_text(
-        f"✏️ Joriy salomlashuv matni:
-
-{current_text}
-
-"
-        f"Yangi matnni kiriting (HTML formatida, {{name}} - foydalanuvchi ismi):
-
-"
+        f"✏️ Joriy salomlashuv matni:\n\n{current_text}\n\n"
+        f"Yangi matnni kiriting (HTML formatida, {{name}} - foydalanuvchi ismi):\n\n"
         f"Linklar qo'shish uchun: LINKS: [{json.dumps(current_links)}]"
     )
 
@@ -252,11 +237,7 @@ async def admin_set_questions_start(update: Update, context: ContextTypes.DEFAUL
     current_text = db.get_setting('questions_text') or 'Savollaringiz bormi?'
 
     await query.edit_message_text(
-        f"❓ Joriy savollar matni:
-
-{current_text}
-
-"
+        f"❓ Joriy savollar matni:\n\n{current_text}\n\n"
         f"Yangi matnni kiriting:"
     )
 
@@ -281,11 +262,7 @@ async def admin_set_about_start(update: Update, context: ContextTypes.DEFAULT_TY
     current_text = db.get_setting('about_text') or 'Bot haqida'
 
     await query.edit_message_text(
-        f"📝 Joriy bot haqida matni:
-
-{current_text}
-
-"
+        f"📝 Joriy bot haqida matni:\n\n{current_text}\n\n"
         f"Yangi matnni kiriting (rasm/video yuborish uchun media yuboring):"
     )
 
