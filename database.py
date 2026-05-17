@@ -1,5 +1,5 @@
 """
-Neon PostgreSQL — site_index qo'shildi
+Neon PostgreSQL — connection pooling va reconnect qo'shildi
 """
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -19,12 +19,27 @@ class Database:
     def _connect(self):
         """Bazaga ulanish (agar hali ulangan bo'lmasa)"""
         if self.conn is not None:
-            return
+            try:
+                # Mavjud ulanishni tekshirish
+                self.conn.cursor().execute('SELECT 1')
+                return
+            except:
+                self.conn = None
+
         if not DATABASE_URL:
             logger.warning("DATABASE_URL o'rnatilmagan! Bazaga ulanib bo'lmadi.")
             return
+
         try:
-            self.conn = psycopg2.connect(DATABASE_URL)
+            # Neon uchun keepalive sozlamalari
+            self.conn = psycopg2.connect(
+                DATABASE_URL,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+                connect_timeout=10
+            )
             self.conn.autocommit = True
             self.create_tables()
             logger.info("Bazaga ulanish muvaffaqiyatli!")
@@ -38,6 +53,16 @@ class Database:
             self._connect()
         if self.conn is None:
             raise RuntimeError("Bazaga ulanib bo'lmadi. DATABASE_URL tekshiring.")
+
+        # Ulanishni tekshirish
+        try:
+            self.conn.cursor().execute('SELECT 1')
+        except:
+            logger.info("Ulanish yopilgan, qayta ulanilmoqda...")
+            self.conn = None
+            self._connect()
+            if self.conn is None:
+                raise RuntimeError("Bazaga qayta ulanib bo'lmadi.")
 
     def create_tables(self):
         with self.conn.cursor() as cur:
@@ -277,5 +302,4 @@ class Database:
             self.conn = None
 
 # Singleton instance
-# Eslatma: Agar DATABASE_URL yo'q bo'lsa, har bir metod chaqirilganda xato beradi
 db = Database()
