@@ -1,104 +1,174 @@
 """
-To'lov tizimi — bir nechta sayt bilan ishlash
-Tanlangan saytga qarab tekshiradi
+payments.py - To'lov tekshiruvi va verifikatsiya
+Universal To'lov Boti v2.0
 """
+
 import aiohttp
-from config import get_site_by_index
+import hashlib
+import hmac
+from typing import Dict, Any, Optional
+from database import get_service_by_id
 
-class PaymentService:
-    def __init__(self, site_index=0):
-        self.site = get_site_by_index(site_index)
-        self.api_url = self.site["url"] if self.site else ""
-        self.api_key = self.site["key"] if self.site else ""
-        self.site_name = self.site["name"] if self.site else "Noma'lum"
-        self.site_index = site_index
 
-    async def check_order(self, order_number):
-        """Saytdan buyurtma tekshirish"""
-        if not self.site:
-            return {"found": False, "error": "Sayt tanlanmagan"}
+async def verify_site_payment(service_id: int, order_number: str) -> Dict[str, Any]:
+    """
+    Sayt orqali buyurtma tekshiruvi
+    Xizmatning API endpointiga so'rov yuboradi
+    """
+    service = await get_service_by_id(service_id)
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                }
-                url = f"{self.api_url}/orders/{order_number}"
+    if not service:
+        return {"found": False, "error": "Xizmat topilmadi"}
 
-                async with session.get(url, headers=headers, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return {
-                            "found": True,
-                            "order_number": data.get("order_number"),
-                            "amount": data.get("amount"),
-                            "status": data.get("status"),
-                            "customer_name": data.get("customer_name"),
-                            "customer_phone": data.get("customer_phone"),
-                            "site_name": self.site_name,
-                            "site_index": self.site_index
-                        }
-                    else:
-                        return {"found": False}
-        except Exception as e:
-            print(f"API xatosi ({self.site_name}): {e}")
-            return self._simulate_order_check(order_number)
+    if not service['api_endpoint']:
+        return {"found": False, "error": "API endpoint sozlanmagan"}
 
-    async def confirm_payment(self, order_number):
-        """Saytda to'lovni tasdiqlash"""
-        if not self.site:
-            return False
+    try:
+        # API so'rovini tayyorlash
+        timestamp = str(int(__import__('time').time()))
+        signature = generate_api_signature(
+            service['api_secret'],
+            order_number=order_number,
+            timestamp=timestamp
+        )
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                }
-                url = f"{self.api_url}/orders/{order_number}/confirm"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{service['api_endpoint']}/orders/{order_number}",
+                headers={
+                    "X-API-Key": service['api_key'],
+                    "X-Signature": signature,
+                    "X-Timestamp": timestamp
+                },
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
 
-                async with session.post(url, headers=headers, timeout=10) as response:
-                    return response.status == 200
-        except Exception as e:
-            print(f"Tasdiqlash xatosi: {e}")
-            return True
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "found": True,
+                        "order_number": order_number,
+                        "amount": data.get('amount', 0),
+                        "status": data.get('status', 'unknown'),
+                        "customer_name": data.get('customer_name'),
+                        "customer_phone": data.get('customer_phone')
+                    }
+                elif response.status == 404:
+                    return {"found": False, "error": "Buyurtma topilmadi"}
+                else:
+                    return {"found": False, "error": f"API xatoligi: {response.status}"}
 
-    def _simulate_order_check(self, order_number):
-        """Test rejimi"""
-        import random
+    except aiohttp.ClientError as e:
+        return {"found": False, "error": f"Ulanish xatoligi: {str(e)}"}
+    except Exception as e:
+        return {"found": False, "error": f"Xatolik: {str(e)}"}
 
-        test_orders = {
-            "12345": {"amount": 50000, "status": "pending"},
-            "67890": {"amount": 150000, "status": "pending"},
+
+async def verify_bot_payment(service_id: int, order_number: str) -> Dict[str, Any]:
+    """
+    Telegram bot orqali buyurtma tekshiruvi
+    Xizmat botining API orqali tekshiruvi
+    """
+    service = await get_service_by_id(service_id)
+
+    if not service:
+        return {"found": False, "error": "Xizmat topilmadi"}
+
+    # Bot to'lovlari webhook orqali tekshiriladi
+    # Bu yerda bizning serverga webhook orqali ma'lumot keladi
+    # Vaqtinchalik: bot tomonidan yuborilgan ma'lumotni tekshirish
+
+    # Agar bot webhook orqali ma'lumot yuborgan bo'lsa,
+    # payments jadvalida qidiramiz
+    from database import get_db
+    conn = await get_db()
+
+    # Bot tomonidan avval yuborilgan to'lovni qidirish
+    row = await conn.fetchrow(
+        """SELECT * FROM payments 
+           WHERE service_id = $1 AND order_number = $2 
+           AND service_type = 'telegram_bot'
+           AND status IN ('pending', 'verified')
+           ORDER BY created_at DESC LIMIT 1""",
+        service_id, order_number
+    )
+    await conn.close()
+
+    if row:
+        return {
+            "found": True,
+            "order_number": order_number,
+            "amount": row['amount'],
+            "status": row['status'],
+            "payment_id": row['id']
         }
 
-        if order_number in test_orders:
-            order = test_orders[order_number]
-            return {
-                "found": True,
-                "order_number": order_number,
-                "amount": order["amount"],
-                "status": order["status"],
-                "customer_name": "Test",
-                "customer_phone": "+998901234567",
-                "site_name": self.site_name,
-                "site_index": self.site_index
-            }
+    return {"found": False, "error": "Bot buyurtmasi topilmadi. Iltimos, avval tashqi botdan to'lovni boshlang."}
 
-        if order_number.isdigit() and len(order_number) >= 4:
-            return {
-                "found": True,
-                "order_number": order_number,
-                "amount": random.randint(10000, 500000),
-                "status": "pending",
-                "customer_name": "Foydalanuvchi",
-                "customer_phone": "+998901234567",
-                "site_name": self.site_name,
-                "site_index": self.site_index
-            }
 
-        return {"found": False}
+async def process_personal_receipt(file_id: str, receipt_type: str, receipt_number: str = None) -> Dict[str, Any]:
+    """
+    Shaxsiy chekni qayta ishlash
+    Screenshotni AI yoki admin tekshiruviga yuborish
+    """
+    # Hozircha admin tekshiruviga yuboriladi
+    # Kelajakda: OCR/AI orqali avtomatik tekshirish
 
-# Asosiy instance — faqat birinchi sayt uchun default
-payment_service = PaymentService()
+    return {
+        "processed": True,
+        "receipt_type": receipt_type,
+        "receipt_number": receipt_number,
+        "file_id": file_id,
+        "verification_required": True,
+        "message": "Chek admin tekshiruviga yuborildi"
+    }
+
+
+def generate_api_signature(secret: str, **params) -> str:
+    """API so'rovi uchun signature yaratish"""
+    sorted_params = sorted(params.items())
+    param_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+    return hmac.new(
+        secret.encode(),
+        param_string.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+
+async def send_webhook_notification(service_id: int, payment_id: int, status: str):
+    """
+    Xizmatga webhook orqali xabar yuborish
+    """
+    service = await get_service_by_id(service_id)
+
+    if not service or not service['webhook_url']:
+        return False
+
+    from database import get_payment_by_id
+    payment = await get_payment_by_id(payment_id)
+
+    if not payment:
+        return False
+
+    payload = {
+        "event": f"payment.{status}",
+        "payment_id": payment_id,
+        "order_number": payment['order_number'],
+        "amount": float(payment['amount']),
+        "currency": payment['currency'],
+        "status": status,
+        "user_id": payment['user_id'],
+        "verified_at": str(payment['verified_at']) if payment['verified_at'] else None
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                service['webhook_url'],
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                return response.status == 200
+    except Exception:
+        return False
