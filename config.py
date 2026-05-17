@@ -1,147 +1,106 @@
 """
-Bot sozlamalari — Render Environment Variables
-Bir nechta sayt bilan ishlash
+config.py - Bot sozlamalari
+Universal To'lov Boti v2.0
 """
+
 import os
-import json
+from dotenv import load_dotenv
 
-# ========== CONVERSATION STATES ==========
-STATE_SITE_SELECTION = 0
-STATE_WAITING_ORDER_NUMBER = 1
-STATE_WAITING_SCREENSHOT = 2
+load_dotenv()
 
-# ========== ASOSIY SOZLAMALAR ==========
+# Bot
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-def safe_int(env_val, default=0):
-    """Xavfsiz int konvertatsiya"""
-    try:
-        return int(env_val) if env_val and env_val.strip() else default
-    except (ValueError, TypeError):
-        return default
+# Adminlar
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = safe_int(os.environ.get("ADMIN_ID"), 0)
-PAYMENT_GROUP_ID = safe_int(os.environ.get("PAYMENT_GROUP_ID"), 0)
-DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE", "uz")
+# Database
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ========== SAYTLAR (JSON formatida) ==========
-# Renderda ENV: SITES = [{"name":"Sayt 1","url":"https://site1.com/api","key":"key1"}]
-SITES_JSON = os.environ.get("SITES", "[]")
-try:
-    SITES = json.loads(SITES_JSON)
-except:
-    SITES = []
+# API
+API_BASE_URL = os.getenv("API_BASE_URL", "https://your-bot.onrender.com")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "super_secret_key")
 
-# ========== TILLAR ==========
-LANGUAGES = {
-    "uz": "O'zbek",
-    "ru": "Русский"
+# Guruh (admin tasdiqlash uchun)
+PAYMENT_GROUP_ID = os.getenv("PAYMENT_GROUP_ID")
+
+# Komissiya (foizda)
+DEFAULT_COMMISSION = float(os.getenv("DEFAULT_COMMISSION", "0.00"))
+
+# Xabarlar
+WELCOME_MESSAGE = """
+👋 Assalomu alaykum!
+
+💳 <b>To'lovlarni tasdiqlash botiga xush kelibsiz!</b>
+
+Bu bot orqali siz:
+• 🌐 Ulangan saytlardan xaridlarni tasdiqlashingiz
+• 🤖 Telegram botlar orqali to'lovlarni tekshirishingiz  
+• 📄 Shaxsiy cheklaringizni yuborib tasdiqlatishingiz mumkin
+
+Quyidagi tugmalar orqali davom eting 👇
+"""
+
+ABOUT_MESSAGE = """
+💳 <b>To'lov Tasdiqlash Boti</b>
+
+Bu bot orqali siz:
+• 🌐 Ulangan saytlardan xaridlarni tasdiqlashingiz
+• 🤖 Telegram botlar orqali to'lovlarni tekshirishingiz
+• 📄 Shaxsiy cheklaringizni yuborib tasdiqlatishingiz mumkin
+
+<b>🏢 Biznes egalari uchun:</b>
+O'z saytingiz yoki botingizni bizga ulab, avtomatik to'lov tasdiqlashni yoqing!
+"""
+
+HELP_MESSAGE = """
+❓ <b>Yordam</b>
+
+<b>💳 To'lovni qanday tasdiqlash?</b>
+1. "To'lov tasdiqlash" tugmasini bosing
+2. Xizmatni tanlang (Sayt/Bot)
+3. Buyurtma raqamini kiriting
+4. To'lov screenshotini yuboring
+5. Admin tasdiqlashini kuting
+
+<b>📄 Shaxsiy chekni qanday tekshirish?</b>
+1. "To'lov tasdiqlash" → "Shaxsiy chekni tekshirish"
+2. To'lov tizimini tanlang (Click/Payme/Apelsin)
+3. Screenshot yuboring
+4. Admin tekshiruvini kuting
+
+<b>🏢 Biznesimni ulashni xohlayman?</b>
+"Bot haqida" → "Biznes Integratsiya" bo'limiga o'ting
+"""
+
+BUSINESS_INTEGRATION_MESSAGE = """
+🏢 <b>Biznes Integratsiya</b>
+
+Sizning biznesingizni bizga ulash orqali:
+
+<b>🌐 Sayt uchun:</b>
+1. API kalit oling
+2. Saytingizga kod qo'shing
+3. Avtomatik tasdiqlashni yoqing
+
+<b>🤖 Telegram Bot uchun:</b>
+1. Bot tokeningizni bering
+2. Webhook sozlang
+3. Deep linkingni yoqing
+
+<b>📊 Nima olasiz?</b>
+✅ Avtomatik to'lov tasdiqlash
+✅ Screenshot tekshiruvi
+✅ Statistika va hisobotlar
+✅ 24/7 qo'llab-quvvatlash
+✅ Minimal komissiya
+"""
+
+# Chek turlari
+RECEIPT_TYPES = {
+    'click': '💳 Click',
+    'payme': '💳 Payme',
+    'apelsin': '🍊 Apelsin',
+    'uzum': '📱 Uzum Bank',
+    'other': '🏦 Boshqa bank'
 }
-
-# ========== TUGMALAR ==========
-BUTTONS = {
-    "uz": {
-        "payment_confirm": "💳 To'lov tasdiqlash",
-        "select_site": "🌐 Sayt tanlash",
-        "about_me": "👤 Men haqimda",
-        "payment_history": "📋 To'lovlar tarixi",
-        "settings": "⚙️ Sozlamalar",
-        "about_bot": "🤖 Bot haqida",
-        "questions": "❓ Savollar",
-        "contact_admin": "📞 Admin bilan bog'lanish",
-        "back": "⬅️ Orqaga",
-        "change_language": "🌐 Tilni o'zgartirish",
-        "statistics": "📊 Statistika",
-        "broadcast": "📢 Ommaviy e'lon",
-        "payment_report": "📈 To'lov hisoboti",
-        "set_welcome": "✏️ Salomlashuv postini sozlash",
-        "set_questions": "❓ Savollar qismini sozlash",
-        "set_about": "📝 Bot haqida qismini sozlash",
-        "daily_report": "📅 Kunlik hisobot",
-        "weekly_report": "📊 Haftalik hisobot"
-    },
-    "ru": {
-        "payment_confirm": "💳 Подтверждение оплаты",
-        "select_site": "🌐 Выбрать сайт",
-        "about_me": "👤 Обо мне",
-        "payment_history": "📋 История платежей",
-        "settings": "⚙️ Настройки",
-        "about_bot": "🤖 О боте",
-        "questions": "❓ Вопросы",
-        "contact_admin": "📞 Связаться с админом",
-        "back": "⬅️ Назад",
-        "change_language": "🌐 Сменить язык",
-        "statistics": "📊 Статистика",
-        "broadcast": "📢 Массовая рассылка",
-        "payment_report": "📈 Отчет по платежам",
-        "set_welcome": "✏️ Настроить приветствие",
-        "set_questions": "❓ Настроить вопросы",
-        "set_about": "📝 Настроить раздел о боте",
-        "daily_report": "📅 Ежедневный отчет",
-        "weekly_report": "📊 Еженедельный отчет"
-    }
-}
-
-MESSAGES = {
-    "uz": {
-        "welcome": "Assalomu alaykum! {name}",
-        "select_site": "Qaysi saytga to'lov qilmoqchisiz?",
-        "enter_order_number": "Saytdan olgan buyurtma raqamingizni yuboring:",
-        "order_not_found": "❌ Bu raqam bo'yicha buyurtma topilmadi.",
-        "order_found": "✅ Buyurtma topildi!\n\n💰 Summa: {amount} so'm\n📦 Status: {status}\n\nTo'lovni amalga oshirgach, screen shot yuboring:",
-        "screenshot_received": "📸 Screen shot qabul qilindi. Tekshirilmoqda...",
-        "payment_approved": "✅ To'lovingiz tasdiqlandi! Endi saytdan davom etishingiz mumkin.",
-        "payment_rejected": "❌ To'lov tasdiqlanmadi. Admin bilan bog'laning.",
-        "no_history": "📭 Hali to'lovlar tarixi mavjud emas.",
-        "select_language": "Tilni tanlang:",
-        "language_changed": "✅ Til o'zgartirildi!",
-        "not_authorized": "❌ Sizga ruxsat yo'q.",
-        "broadcast_sent": "📢 Xabar {count} ta foydalanuvchiga yuborildi.",
-        "stats_users": "👥 Foydalanuvchilar: {count}",
-        "stats_payments": "💰 Jami to'lovlar: {count} ta ({amount} so'm)",
-        "daily_report": "📅 Kunlik hisobot ({date}):\n\n💳 To'lovlar: {count} ta\n💰 Jami summa: {amount} so'm",
-        "weekly_report": "📊 Haftalik hisobot ({start} - {end}):\n\n💳 To'lovlar: {count} ta\n💰 Jami summa: {amount} so'm"
-    },
-    "ru": {
-        "welcome": "Здравствуйте! {name}",
-        "select_site": "Выберите сайт для оплаты:",
-        "enter_order_number": "Отправьте номер вашего заказа с сайта:",
-        "order_not_found": "❌ Заказ с таким номером не найден.",
-        "order_found": "✅ Заказ найден!\n\n💰 Сумма: {amount} сум\n📦 Статус: {status}\n\nПосле оплаты отправьте скриншот:",
-        "screenshot_received": "📸 Скриншот получен. Проверяется...",
-        "payment_approved": "✅ Ваш платеж подтвержден! Теперь вы можете продолжить на сайте.",
-        "payment_rejected": "❌ Платеж не подтвержден. Свяжитесь с админом.",
-        "no_history": "📭 История платежей пока пуста.",
-        "select_language": "Выберите язык:",
-        "language_changed": "✅ Язык изменен!",
-        "not_authorized": "❌ У вас нет доступа.",
-        "broadcast_sent": "📢 Сообщение отправлено {count} пользователям.",
-        "stats_users": "👥 Пользователей: {count}",
-        "stats_payments": "💰 Всего платежей: {count} ({amount} сум)",
-        "daily_report": "📅 Ежедневный отчет ({date}):\n\n💳 Платежей: {count}\n💰 Общая сумма: {amount} сум",
-        "weekly_report": "📊 Еженедельный отчет ({start} - {end}):\n\n💳 Платежей: {count}\n💰 Общая сумма: {amount} сум"
-    }
-}
-
-def get_text(lang, key, **kwargs):
-    text = MESSAGES.get(lang, MESSAGES["uz"]).get(key, key)
-    if kwargs:
-        text = text.format(**kwargs)
-    return text
-
-def get_button(lang, key):
-    return BUTTONS.get(lang, BUTTONS["uz"]).get(key, key)
-
-def get_site_by_index(index):
-    """Sayt indeksi bo'yicha ma'lumot olish"""
-    if 0 <= index < len(SITES):
-        return SITES[index]
-    return None
-
-def get_site_names():
-    """Barcha sayt nomlarini ro'yxatini olish"""
-    return [(i, site["name"]) for i, site in enumerate(SITES)]
-
-def get_site_count():
-    """Saytlar soni"""
-    return len(SITES)
