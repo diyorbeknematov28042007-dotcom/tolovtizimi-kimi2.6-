@@ -1,286 +1,261 @@
-"""Admin funksiyalari"""
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from config import ADMIN_ID, get_text, get_button
-from database import db
-from datetime import datetime, timedelta
-import json
+"""
+admin.py - Admin panel funksiyalari
+Universal To'lov Boti v2.0
+"""
+
+from aiogram import types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from database import (
+    get_pending_payments, update_payment_status, get_stats,
+    get_pending_business_requests, update_business_request_status,
+    get_service_by_id, add_service
+)
+from payments import send_webhook_notification
+from config import ADMIN_IDS
+
 
 async def is_admin(user_id: int) -> bool:
-    """Foydalanuvchi admin ekanligini tekshirish"""
-    return user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin paneli"""
-    user_id = update.effective_user.id
 
-    if not await is_admin(user_id):
-        await update.message.reply_text("❌ Sizga ruxsat yo'q.")
-        return
+def get_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Statistika", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="Kutilayotgan to'lovlar", callback_data="admin_pending_payments")],
+        [InlineKeyboardButton(text="Biznes arizalari", callback_data="admin_business_requests")],
+        [InlineKeyboardButton(text="Xizmatlarni boshqarish", callback_data="admin_services")],
+        [InlineKeyboardButton(text="Ommaviy xabar", callback_data="admin_broadcast")]
+    ])
 
-    keyboard = [
-        [InlineKeyboardButton("📊 Statistika", callback_data='admin_stats')],
-        [InlineKeyboardButton("📢 Ommaviy e'lon", callback_data='admin_broadcast')],
-        [InlineKeyboardButton("📈 To'lov hisoboti", callback_data='admin_report')],
-        [InlineKeyboardButton("✏️ Salomlashuv postini sozlash", callback_data='admin_set_welcome')],
-        [InlineKeyboardButton("❓ Savollar qismini sozlash", callback_data='admin_set_questions')],
-        [InlineKeyboardButton("📝 Bot haqida qismini sozlash", callback_data='admin_set_about')],
-        [InlineKeyboardButton("⬅️ Orqaga", callback_data='back_main')]
-    ]
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("🔧 Admin paneli:", reply_markup=reply_markup)
+def get_payment_action_keyboard(payment_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Tasdiqlash", callback_data="admin_approve_" + str(payment_id)),
+            InlineKeyboardButton(text="Rad etish", callback_data="admin_reject_" + str(payment_id))
+        ],
+        [InlineKeyboardButton(text="Izoh qo'shish", callback_data="admin_note_" + str(payment_id))]
+    ])
 
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Statistika"""
-    query = update.callback_query
-    await query.answer()
 
-    if not await is_admin(query.from_user.id):
-        return
+def get_business_request_keyboard(request_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Tasdiqlash", callback_data="biz_approve_" + str(request_id)),
+            InlineKeyboardButton(text="Rad etish", callback_data="biz_reject_" + str(request_id))
+        ]
+    ])
 
-    users_count = db.get_users_count()
-    stats = db.get_payments_stats()
-    total_payments = stats[0] if stats else 0
-    total_amount = stats[1] if stats else 0
 
-    text = f"""📊 Statistika:
+async def show_stats(message: types.Message):
+    stats = await get_stats()
 
-👥 Foydalanuvchilar: {users_count}
-💰 Jami to'lovlar: {total_payments} ta
-💵 Jami summa: {total_amount:,.0f} so'm"""
-
-    keyboard = [[InlineKeyboardButton("⬅️ Orqaga", callback_data='admin_panel')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ommaviy e'lon boshlash"""
-    query = update.callback_query
-    await query.answer()
-
-    if not await is_admin(query.from_user.id):
-        return
-
-    context.user_data['admin_state'] = 'broadcast'
-    await query.edit_message_text(
-        "📢 Yuboriladigan xabarni kiriting (matn, rasm, video yoki hujjat):\n\n"
-        "Eslatma: Xabar barcha foydalanuvchilarga yuboriladi."
+    text = (
+        "Statistika\n\n"
+        "To'lovlar:\n"
+        "Jami: " + str(stats['total_payments']) + "\n"
+        "Tasdiqlangan: " + str(stats['verified_payments']) + "\n"
+        "Kutilmoqda: " + str(stats['pending_payments']) + "\n"
+        "Umumiy summa: " + str(stats['total_amount']) + " UZS\n\n"
+        "Foydalanuvchilar: " + str(stats['total_users']) + "\n"
+        "Faol xizmatlar: " + str(stats['total_services'])
     )
 
-async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ommaviy xabar yuborish"""
-    if not await is_admin(update.effective_user.id):
+    await message.answer(text)
+
+
+async def show_pending_payments(message: types.Message, bot):
+    payments = await get_pending_payments(limit=10)
+
+    if not payments:
+        await message.answer("Kutilayotgan to'lovlar yo'q!")
         return
 
-    users = db.get_all_users()
-    sent_count = 0
-    failed_count = 0
+    await message.answer("Kutilayotgan to'lovlar (" + str(len(payments)) + " ta)")
 
-    for user in users:
-        try:
-            if update.message.text:
-                await context.bot.send_message(user['telegram_id'], update.message.text)
-            elif update.message.photo:
-                await context.bot.send_photo(
-                    user['telegram_id'],
-                    update.message.photo[-1].file_id,
-                    caption=update.message.caption
-                )
-            elif update.message.video:
-                await context.bot.send_video(
-                    user['telegram_id'],
-                    update.message.video.file_id,
-                    caption=update.message.caption
-                )
-            elif update.message.document:
-                await context.bot.send_document(
-                    user['telegram_id'],
-                    update.message.document.file_id,
-                    caption=update.message.caption
-                )
-            sent_count += 1
-        except Exception as e:
-            print(f"Xabar yuborishda xato (user {user['telegram_id']}): {e}")
-            failed_count += 1
+    for payment in payments[:5]:
+        service = await get_service_by_id(payment['service_id']) if payment['service_id'] else None
+        service_name = service['name'] if service else "Shaxsiy chek"
 
-    await update.message.reply_text(
-        f"📢 Xabar yuborildi!\n\n"
-        f"✅ Muvaffaqiyatli: {sent_count}\n"
-        f"❌ Xato: {failed_count}"
+        text = (
+            "To'lov #" + str(payment['id']) + "\n\n"
+            "User: @" + str(payment['user_username'] or payment['user_id']) + "\n"
+            "Xizmat: " + service_name + "\n"
+            "Buyurtma: " + str(payment['order_number'] or 'N/A') + "\n"
+            "Summa: " + str(payment['amount']) + " UZS\n"
+            "Chek turi: " + str(payment['receipt_type'] or 'N/A') + "\n"
+            "Sana: " + payment['created_at'].strftime('%Y-%m-%d %H:%M')
+        )
+
+        if payment['receipt_screenshot']:
+            await bot.send_photo(
+                message.chat.id,
+                photo=payment['receipt_screenshot'],
+                caption=text,
+                reply_markup=get_payment_action_keyboard(payment['id'])
+            )
+        else:
+            await message.answer(
+                text,
+                reply_markup=get_payment_action_keyboard(payment['id'])
+            )
+
+
+async def approve_payment(callback: types.CallbackQuery, bot, payment_id: int):
+    payment = await update_payment_status(
+        payment_id=payment_id,
+        status='verified',
+        admin_id=callback.from_user.id
     )
 
-    context.user_data['admin_state'] = None
+    from database import get_payment_by_id
+    payment_data = await get_payment_by_id(payment_id)
 
-async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """To'lov hisoboti"""
-    query = update.callback_query
-    await query.answer()
+    if payment_data:
+        await bot.send_message(
+            payment_data['user_id'],
+            (
+                "To'lovingiz tasdiqlandi!\n\n"
+                "Summa: " + str(payment_data['amount']) + " UZS\n"
+                "Sana: " + payment_data['verified_at'].strftime('%Y-%m-%d %H:%M') + "\n\n"
+                "Rahmat!"
+            )
+        )
 
-    if not await is_admin(query.from_user.id):
-        return
+        if payment_data['service_id']:
+            await send_webhook_notification(
+                payment_data['service_id'],
+                payment_id,
+                'verified'
+            )
 
-    keyboard = [
-        [InlineKeyboardButton("📅 Kunlik hisobot", callback_data='report_daily')],
-        [InlineKeyboardButton("📊 Haftalik hisobot", callback_data='report_weekly')],
-        [InlineKeyboardButton("⬅️ Orqaga", callback_data='admin_panel')]
-    ]
+    await callback.message.edit_text(
+        (callback.message.caption or callback.message.text) + "\n\nTASDIQLANDI"
+    )
+    await callback.answer("To'lov tasdiqlandi!")
 
-    await query.edit_message_text(
-        "📈 To'lov hisobotini tanlang:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+
+async def reject_payment(callback: types.CallbackQuery, bot, payment_id: int):
+    from database import get_payment_by_id
+    payment_data = await get_payment_by_id(payment_id)
+
+    await update_payment_status(
+        payment_id=payment_id,
+        status='rejected',
+        admin_id=callback.from_user.id
     )
 
-async def admin_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Kunlik hisobot"""
-    query = update.callback_query
-    await query.answer()
+    if payment_data:
+        await bot.send_message(
+            payment_data['user_id'],
+            (
+                "To'lovingiz rad etildi.\n\n"
+                "Summa: " + str(payment_data['amount']) + " UZS\n\n"
+                "Qo'shimcha ma'lumot uchun admin bilan bog'laning."
+            )
+        )
 
-    if not await is_admin(query.from_user.id):
+    await callback.message.edit_text(
+        (callback.message.caption or callback.message.text) + "\n\nRAD ETILDI"
+    )
+    await callback.answer("To'lov rad etildi!")
+
+
+async def show_business_requests(message: types.Message):
+    requests = await get_pending_business_requests()
+
+    if not requests:
+        await message.answer("Kutilayotgan biznes arizalari yo'q!")
         return
 
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow = today + timedelta(days=1)
+    await message.answer("Kutilayotgan arizalar (" + str(len(requests)) + " ta)")
 
-    payments = db.get_payments_by_date(today, tomorrow)
-    total_amount = sum(p['amount'] for p in payments if p['status'] == 'approved')
+    for req in requests:
+        text = (
+            "Biznes Ariza #" + str(req['id']) + "\n\n"
+            "Nomi: " + req['business_name'] + "\n"
+            "Tur: " + ('Sayt' if req['business_type'] == 'website' else 'Telegram Bot') + "\n"
+            "Ariza beruvchi: @" + str(req['requester_username'] or req['requester_id']) + "\n"
+            "Telefon: " + str(req['contact_phone'] or 'N/A') + "\n"
+            "Email: " + str(req['contact_email'] or 'N/A') + "\n"
+            "Tavsif: " + str(req['description'] or 'N/A') + "\n"
+            "Sana: " + req['created_at'].strftime('%Y-%m-%d %H:%M')
+        )
 
-    text = f"""📅 Kunlik hisobot ({today.strftime('%d.%m.%Y')}):
+        await message.answer(
+            text,
+            reply_markup=get_business_request_keyboard(req['id'])
+        )
 
-💳 To'lovlar: {len(payments)} ta
-💰 Jami summa: {total_amount:,.0f} so'm
 
-Batafsil:"""
+async def approve_business_request(callback: types.CallbackQuery, request_id: int):
+    from database import get_db
+    conn = await get_db()
 
-    for payment in payments:
-        status_emoji = "✅" if payment['status'] == 'approved' else "⏳" if payment['status'] == 'pending' else "❌"
-        text += f"\n{status_emoji} #{payment['order_number']} - {payment['amount']:,.0f} so'm"
-
-    keyboard = [[InlineKeyboardButton("⬅️ Orqaga", callback_data='admin_report')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def admin_weekly_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Haftalik hisobot"""
-    query = update.callback_query
-    await query.answer()
-
-    if not await is_admin(query.from_user.id):
-        return
-
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    week_ago = today - timedelta(days=7)
-
-    payments = db.get_payments_by_date(week_ago, today + timedelta(days=1))
-    total_amount = sum(p['amount'] for p in payments if p['status'] == 'approved')
-
-    text = f"""📊 Haftalik hisobot ({week_ago.strftime('%d.%m.%Y')} - {today.strftime('%d.%m.%Y')}):
-
-💳 To'lovlar: {len(payments)} ta
-💰 Jami summa: {total_amount:,.0f} so'm
-
-Batafsil:"""
-
-    for payment in payments:
-        status_emoji = "✅" if payment['status'] == 'approved' else "⏳" if payment['status'] == 'pending' else "❌"
-        text += f"\n{status_emoji} #{payment['order_number']} - {payment['amount']:,.0f} so'm"
-
-    keyboard = [[InlineKeyboardButton("⬅️ Orqaga", callback_data='admin_report')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def admin_set_welcome_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Salomlashuv postini sozlash boshlash"""
-    query = update.callback_query
-    await query.answer()
-
-    if not await is_admin(query.from_user.id):
-        return
-
-    context.user_data['admin_state'] = 'set_welcome'
-    current_text, current_links = db.get_welcome_data()
-
-    await query.edit_message_text(
-        f"✏️ Joriy salomlashuv matni:\n\n{current_text}\n\n"
-        f"Yangi matnni kiriting (HTML formatida, {{name}} - foydalanuvchi ismi):\n\n"
-        f"Linklar qo'shish uchun: LINKS: [{json.dumps(current_links)}]"
+    req = await conn.fetchrow(
+        "SELECT * FROM business_requests WHERE id = $1", request_id
     )
 
-async def admin_set_welcome_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Salomlashuv postini saqlash"""
-    if not await is_admin(update.effective_user.id):
+    if not req:
+        await callback.answer("Ariza topilmadi!")
+        await conn.close()
         return
 
-    text = update.message.text
-    links = []
-
-    # Linklarni ajratib olish
-    if 'LINKS:' in text:
-        parts = text.split('LINKS:')
-        text = parts[0].strip()
-        try:
-            links = json.loads(parts[1].strip())
-        except:
-            pass
-
-    db.set_welcome_data(text, links)
-
-    await update.message.reply_text("✅ Salomlashuv posti yangilandi!")
-    context.user_data['admin_state'] = None
-
-async def admin_set_questions_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Savollar qismini sozlash boshlash"""
-    query = update.callback_query
-    await query.answer()
-
-    if not await is_admin(query.from_user.id):
-        return
-
-    context.user_data['admin_state'] = 'set_questions'
-    current_text = db.get_setting('questions_text') or 'Savollaringiz bormi?'
-
-    await query.edit_message_text(
-        f"❓ Joriy savollar matni:\n\n{current_text}\n\n"
-        f"Yangi matnni kiriting:"
+    service_id = await add_service(
+        name=req['business_name'],
+        service_type=req['business_type'],
+        owner_id=req['requester_id'],
+        owner_username=req['requester_username']
     )
 
-async def admin_set_questions_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Savollar qismini saqlash"""
-    if not await is_admin(update.effective_user.id):
-        return
+    import secrets
+    api_key = secrets.token_urlsafe(32)
+    api_secret = secrets.token_urlsafe(32)
 
-    db.set_setting('questions_text', update.message.text)
-    await update.message.reply_text("✅ Savollar bo'limi yangilandi!")
-    context.user_data['admin_state'] = None
+    await conn.execute("""
+        UPDATE services 
+        SET api_key = $1, api_secret = $2 
+        WHERE id = $3
+    """, api_key, api_secret, service_id)
 
-async def admin_set_about_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Bot haqida qismini sozlash boshlash"""
-    query = update.callback_query
-    await query.answer()
+    await update_business_request_status(request_id, 'approved')
+    await conn.close()
 
-    if not await is_admin(query.from_user.id):
-        return
-
-    context.user_data['admin_state'] = 'set_about'
-    current_text = db.get_setting('about_text') or 'Bot haqida'
-
-    await query.edit_message_text(
-        f"📝 Joriy bot haqida matni:\n\n{current_text}\n\n"
-        f"Yangi matnni kiriting (rasm/video yuborish uchun media yuboring):"
+    from bot import bot
+    await bot.send_message(
+        req['requester_id'],
+        (
+            "Arizangiz tasdiqlandi!\n\n"
+            "Xizmat: " + req['business_name'] + "\n"
+            "API Kalit: " + api_key + "\n\n"
+            "Endi saytingiz/botingizni bizga ulashingiz mumkin."
+        )
     )
 
-async def admin_set_about_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Bot haqida qismini saqlash"""
-    if not await is_admin(update.effective_user.id):
-        return
+    await callback.message.edit_text(
+        callback.message.text + "\n\nTASDIQLANDI"
+    )
+    await callback.answer("Ariza tasdiqlandi!")
 
-    if update.message.text:
-        db.set_setting('about_text', update.message.text)
-    elif update.message.photo:
-        db.set_setting('about_media', update.message.photo[-1].file_id)
-        if update.message.caption:
-            db.set_setting('about_text', update.message.caption)
-    elif update.message.video:
-        db.set_setting('about_media', update.message.video.file_id)
-        if update.message.caption:
-            db.set_setting('about_text', update.message.caption)
 
-    await update.message.reply_text("✅ Bot haqida bo'limi yangilandi!")
-    context.user_data['admin_state'] = None
+async def reject_business_request(callback: types.CallbackQuery, request_id: int):
+    await update_business_request_status(request_id, 'rejected')
+
+    from database import get_db
+    conn = await get_db()
+    req = await conn.fetchrow(
+        "SELECT requester_id FROM business_requests WHERE id = $1", request_id
+    )
+    await conn.close()
+
+    if req:
+        from bot import bot
+        await bot.send_message(
+            req['requester_id'],
+            "Arizangiz rad etildi. Qo'shimcha ma'lumot uchun admin bilan bog'laning."
+        )
+
+    await callback.message.edit_text(
+        callback.message.text + "\n\nRAD ETILDI"
+    )
+    await callback.answer("Ariza rad etildi!")
