@@ -1,795 +1,1036 @@
-"""Asosiy bot - Maxsus to'lov boti (Webhook + Health Check)
-Deploy: Render Web Service
-Database: Neon PostgreSQL
 """
-import os
-import json
-import logging
-import tempfile
+bot.py - Asosiy Telegram Bot
+Universal To'lov Boti v2.0
+"""
+
 import asyncio
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    filters, ContextTypes
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup,
+    InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 )
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Route
-import uvicorn
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
 from config import (
-    BOT_TOKEN, ADMIN_ID, PAYMENT_GROUP_ID, DEFAULT_LANGUAGE,
-    LANGUAGES, get_text, get_button, get_site_names, get_site_count,
-    STATE_SITE_SELECTION, STATE_WAITING_ORDER_NUMBER, STATE_WAITING_SCREENSHOT
+    BOT_TOKEN, ADMIN_IDS, WELCOME_MESSAGE, ABOUT_MESSAGE,
+    HELP_MESSAGE, BUSINESS_INTEGRATION_MESSAGE, RECEIPT_TYPES
 )
-from database import db
-from payments import payment_service
-from screenshot_checker import screenshot_checker
+from database import (
+    init_db, get_active_services, get_service_by_id,
+    create_payment, get_or_create_user, get_pending_payments,
+    create_business_request, get_pending_business_requests,
+    update_business_request_status, add_service
+)
+from payments import verify_site_payment, verify_bot_payment, process_personal_receipt
 from admin import (
-    is_admin, admin_panel, admin_stats, admin_broadcast_start,
-    admin_broadcast_send, admin_report, admin_daily_report,
-    admin_weekly_report, admin_set_welcome_start, admin_set_welcome_save,
-    admin_set_questions_start, admin_set_questions_save,
-    admin_set_about_start, admin_set_about_save
+    is_admin, get_admin_keyboard, get_payment_action_keyboard,
+    get_business_request_keyboard, show_stats, show_pending_payments,
+    approve_payment, reject_payment, show_business_requests,
+    approve_business_request, reject_business_request
 )
 
 # Logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Avtomatik tasdiqlash chegarasi (85% ishonch)
-AUTO_APPROVE_THRESHOLD = 0.85
+# Bot va Dispatcher
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-# ========== YORDAMCHI FUNKSIYALAR ==========
+# ============================================
+# STATES (FSM)
+# ============================================
+class PaymentStates(StatesGroup):
+    waiting_order_number = State()
+    waiting_screenshot = State()
+    waiting_receipt_type = State()
+    waiting_receipt_number = State()
+    waiting_business_name = State()
+    waiting_business_type = State()
+    waiting_contact = State()
+    waiting_description = State()
+    waiting_broadcast = State()
 
-def get_user_lang(user_id):
-    """Foydalanuvchi tilini olish"""
-    user = db.get_user(user_id)
-    return user['language'] if user else DEFAULT_LANGUAGE
+# ============================================
+# KEYBOARDS
+# ============================================
 
-def get_main_keyboard(lang):
-    """Asosiy menyu tugmalari"""
-    keyboard = [
-        [InlineKeyboardButton(get_button(lang, "payment_confirm"), callback_data='payment_confirm')],
-        [InlineKeyboardButton(get_button(lang, "about_me"), callback_data='about_me'),
-         InlineKeyboardButton(get_button(lang, "payment_history"), callback_data='payment_history')],
-        [InlineKeyboardButton(get_button(lang, "settings"), callback_data='settings'),
-         InlineKeyboardButton(get_button(lang, "about_bot"), callback_data='about_bot')],
-        [InlineKeyboardButton(get_button(lang, "questions"), callback_data='questions')]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ========== START VA ASOSIY MENYU ==========
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start komandasi"""
-    user = update.effective_user
-
-    db.add_user(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        last_name=user.last_name
+def get_main_keyboard():
+    """Asosiy menyu keyboard"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💳 To'lov tasdiqlash")],
+            [KeyboardButton(text="📋 To'lovlar tarixi")],
+            [KeyboardButton(text="ℹ️ Bot haqida")],
+            [KeyboardButton(text="❓ Yordam")]
+        ],
+        resize_keyboard=True
     )
 
-    lang = get_user_lang(user.id)
-    welcome_text, welcome_links = db.get_welcome_data()
 
-    text = welcome_text.format(name=user.first_name)
+def get_services_keyboard():
+    """Ulangan xizmatlar keyboard"""
+    services = asyncio.run(get_active_services())
 
-    keyboard = []
-    for link in welcome_links:
-        keyboard.append([InlineKeyboardButton(link['name'], url=link['url'])])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
 
-    keyboard.extend([
-        [InlineKeyboardButton(get_button(lang, "payment_confirm"), callback_data='payment_confirm')],
-        [InlineKeyboardButton(get_button(lang, "about_me"), callback_data='about_me'),
-         InlineKeyboardButton(get_button(lang, "payment_history"), callback_data='payment_history')],
-        [InlineKeyboardButton(get_button(lang, "settings"), callback_data='settings'),
-         InlineKeyboardButton(get_button(lang, "about_bot"), callback_data='about_bot')],
-        [InlineKeyboardButton(get_button(lang, "questions"), callback_data='questions')]
+    # Saytlar
+    websites = [s for s in services if s['type'] == 'website']
+    if websites:
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text="🌐 SAYTLAR:", callback_data="header_websites")]
+        )
+        for site in websites:
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🌐 {site['name']}",
+                    callback_data=f"service_website_{site['id']}"
+                )
+            ])
+
+    # Botlar
+    bots = [s for s in services if s['type'] == 'telegram_bot']
+    if bots:
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text="🤖 TELEGRAM BOTlar:", callback_data="header_bots")]
+        )
+        for b in bots:
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🤖 {b['name']}",
+                    callback_data=f"service_bot_{b['id']}"
+                )
+            ])
+
+    # Separator va shaxsiy chek
+    if websites or bots:
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text="───────────────", callback_data="separator")]
+        )
+
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            text="📄 Shaxsiy chekni tekshirish",
+            callback_data="personal_receipt"
+        )
     ])
 
-    if await is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("🔧 Admin panel", callback_data='admin_panel')])
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="◀️ Orqaga", callback_data="back_main")
+    ])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    return keyboard
 
-# ========== TO'LOV TASDIQLASH ==========
 
-async def payment_confirm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """To'lov tasdiqlashni boshlash - avval sayt tanlash"""
-    query = update.callback_query
-    await query.answer()
+def get_receipt_type_keyboard():
+    """Chek turi tanlash keyboard"""
+    buttons = []
+    for key, name in RECEIPT_TYPES.items():
+        buttons.append([InlineKeyboardButton(text=name, callback_data=f"receipt_{key}")])
 
-    user_id = query.from_user.id
-    lang = get_user_lang(user_id)
-    sites = get_site_names()
+    buttons.append([InlineKeyboardButton(text="◀️ Orqaga", callback_data="back_services")])
 
-    if len(sites) <= 1:
-        context.user_data['site_index'] = 0
-        await query.edit_message_text(
-            get_text(lang, "enter_order_number"),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]
-            ])
-        )
-        context.user_data['state'] = STATE_WAITING_ORDER_NUMBER
-        return
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    keyboard = []
-    for index, name in sites:
-        keyboard.append([InlineKeyboardButton(f"🌐 {name}", callback_data=f'site_{index}')])
-    keyboard.append([InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')])
 
-    await query.edit_message_text(
-        get_text(lang, "select_site"),
-        reply_markup=InlineKeyboardMarkup(keyboard)
+def get_business_keyboard():
+    """Biznes integratsiya keyboard"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Sayt ulash", callback_data="connect_website")],
+        [InlineKeyboardButton(text="🤖 Bot ulash", callback_data="connect_bot")],
+        [InlineKeyboardButton(text="📊 Nima olaman?", callback_data="benefits")],
+        [InlineKeyboardButton(text="📝 Ariza yuborish", callback_data="apply_business")],
+        [InlineKeyboardButton(text="◀️ Orqaga", callback_data="back_about")]
+    ])
+
+
+# ============================================
+# START HANDLER
+# ============================================
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    """/start handler - Deep link tekshirish"""
+    await state.clear()
+
+    # Foydalanuvchini saqlash
+    await get_or_create_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name
     )
 
-    context.user_data['state'] = STATE_SITE_SELECTION
+    # Deep link tekshirish
+    args = message.text.split()
+    if len(args) > 1:
+        param = args[1]
 
-async def process_site_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saytni tanlash"""
-    if context.user_data.get('state') != STATE_SITE_SELECTION:
-        return
+        # Format: service_{ID}_order_{ORDER_ID}
+        if param.startswith("service_"):
+            parts = param.split("_")
+            if len(parts) >= 4:
+                service_id = parts[1]
+                order_id = parts[3]
 
-    query = update.callback_query
-    await query.answer()
+                service = await get_service_by_id(int(service_id))
+                if service:
+                    await message.answer(
+                        f"🔗 <b>Siz {service['name']} xizmatidan yo'naltirildingiz.</b>
 
-    site_index = int(query.data.split('_')[1])
-    context.user_data['site_index'] = site_index
+"
+                        f"📦 Buyurtma: <code>#{order_id}</code>
 
-    lang = get_user_lang(query.from_user.id)
-
-    await query.edit_message_text(
-        get_text(lang, "enter_order_number"),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]
-        ])
-    )
-
-    context.user_data['state'] = STATE_WAITING_ORDER_NUMBER
-
-async def process_order_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Buyurtma raqamini qabul qilish"""
-    if context.user_data.get('state') != STATE_WAITING_ORDER_NUMBER:
-        return
-
-    user_id = update.effective_user.id
-    lang = get_user_lang(user_id)
-    order_number = update.message.text.strip()
-
-    site_index = context.user_data.get('site_index', 0)
-    from payments import PaymentService
-    current_payment_service = PaymentService(site_index)
-    order_data = await current_payment_service.check_order(order_number)
-
-    if not order_data['found']:
-        await update.message.reply_text(
-            get_text(lang, "order_not_found"),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]
-            ])
-        )
-        context.user_data['state'] = None
-        return
-
-    context.user_data['order_number'] = order_number
-    context.user_data['order_amount'] = order_data['amount']
-
-    text = get_text(lang, "order_found",
-                    amount=f"{order_data['amount']:,.0f}",
-                    status=order_data['status'])
-
-    await update.message.reply_text(text)
-
-    payment_id = db.add_payment(
-        user_id=user_id,
-        site_index=site_index,
-        site_name=order_data.get('site_name', "Asosiy sayt"),
-        order_number=order_number,
-        amount=order_data['amount']
-    )
-    context.user_data['payment_id'] = payment_id
-
-    screenshot_msg = """📸 Iltimos, to'lov chekining screen shotini yuboring:
-
-💡 Bot avtomatik tekshiradi:
- ✅ Rasm haqiqiyligi
- ✅ Summa to'g'riligi
- ✅ Vaqt belgisi
- ✅ Tranzaksiya ID"""
-
-    await update.message.reply_text(screenshot_msg)
-    context.user_data['state'] = STATE_WAITING_SCREENSHOT
-
-async def process_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Screen shotni qabul qilish va AVTO TEKSHIRISH"""
-    if context.user_data.get('state') != STATE_WAITING_SCREENSHOT:
-        return
-
-    user_id = update.effective_user.id
-    lang = get_user_lang(user_id)
-    payment_id = context.user_data.get('payment_id')
-    order_number = context.user_data.get('order_number')
-    order_amount = context.user_data.get('order_amount')
-
-    if not payment_id:
-        return
-
-    file_id = None
-    file_type = None
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file_type = 'photo'
-    elif update.message.document:
-        file_id = update.message.document.file_id
-        file_type = 'document'
-    else:
-        await update.message.reply_text("❌ Iltimos, rasm yuboring.")
-        return
-
-    db.update_payment_screenshot(payment_id, file_id, update.message.message_id)
-    await update.message.reply_text("🔍 Screen shot avtomatik tekshirilmoqda...")
-
-    try:
-        file = await context.bot.get_file(file_id)
-
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-            await file.download_to_drive(tmp_file.name)
-            tmp_path = tmp_file.name
-
-        check_result = await screenshot_checker.check_screenshot(
-            tmp_path,
-            expected_amount=order_amount,
-            order_number=order_number
-        )
-
-        os.unlink(tmp_path)
-
-        validity = "✅ Haqiqiy" if check_result['is_valid'] else "⚠️ Shubhali"
-        recommendation = check_result.get('recommendation', 'Admin tekshiruvini kuting')
-
-        status_text = f"""📊 Tekshirish natijasi:
-
-🎯 Ishonch darajasi: {check_result['confidence']*100:.0f}%
-{validity}
-
-📋 Topilgan ma'lumotlar:
-💰 Summa: {check_result['extracted_data'].get('found_amount', 'N/A')}
-🕐 Vaqt: {check_result['extracted_data'].get('found_time', 'N/A')}
-🆔 Tranzaksiya ID: {check_result['extracted_data'].get('transaction_id', 'N/A')}
-
-{"✅ Avtomatik tasdiqlandi!" if check_result['is_valid'] else recommendation}"""
-
-        if check_result['issues']:
-            issues_text = "\n".join([f" • {issue}" for issue in check_result['issues']])
-            status_text += f"\n\n⚠️ Muammolar:\n{issues_text}"
-
-        await update.message.reply_text(status_text)
-
-        if check_result['is_valid'] and check_result['confidence'] >= AUTO_APPROVE_THRESHOLD:
-            db.approve_payment(payment_id, 0)
-            await payment_service.confirm_payment(order_number)
-
-            auto_msg = f"""🎉 To'lovingiz avtomatik tasdiqlandi!
-
-✅ Endi saytdan davom etishingiz mumkin.
-📋 Buyurtma: #{order_number}
-💰 Summa: {order_amount:,.0f} so'm"""
-
-            await update.message.reply_text(auto_msg)
-
-            if PAYMENT_GROUP_ID:
-                user = update.effective_user
-                group_auto_msg = f"""✅ AVTO TASDIQLANDI!
-
-👤 Foydalanuvchi: {user.first_name} (@{user.username or "Noma'lum"})
-🆔 ID: {user.id}
-📋 Buyurtma: #{order_number}
-💰 Summa: {order_amount:,.0f} so'm
-🎯 Ishonch: {check_result['confidence']*100:.0f}%
-🤖 Avtomatik tasdiq"""
-
-                await context.bot.send_message(
-                    chat_id=PAYMENT_GROUP_ID,
-                    text=group_auto_msg
-                )
-
-        else:
-            pending_msg = """⏳ Screen shot admin tekshiruviga yuborildi.
-Natijasi tez orada xabar qilinadi."""
-
-            await update.message.reply_text(pending_msg)
-
-            if PAYMENT_GROUP_ID:
-                user = update.effective_user
-                issues_str = "\n".join(check_result['issues']) if check_result['issues'] else "Yo'q"
-
-                group_text = f"""⚠️ TEKSHIRUV TALAB ETILADI!
-
-👤 Foydalanuvchi: {user.first_name} (@{user.username or "Noma'lum"})
-🆔 ID: {user.id}
-📋 Buyurtma: #{order_number}
-💰 Summa: {order_amount:,.0f} so'm
-⏰ Vaqt: {update.message.date.strftime('%d.%m.%Y %H:%M')}
-🎯 Ishonch: {check_result['confidence']*100:.0f}%
-
-📋 Tekshirish natijalari:
-💰 Topilgan summa: {check_result['extracted_data'].get('found_amount', 'N/A')}
-🕐 Topilgan vaqt: {check_result['extracted_data'].get('found_time', 'N/A')}
-🆔 Tranzaksiya ID: {check_result['extracted_data'].get('transaction_id', 'N/A')}
-
-⚠️ Muammolar:
-{issues_str}"""
-
-                if file_type == 'photo':
-                    group_message = await context.bot.send_photo(
-                        chat_id=PAYMENT_GROUP_ID,
-                        photo=file_id,
-                        caption=group_text
+"
+                        f"To'lovni tasdiqlash uchun quyidagi tugmani bosing:",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(
+                                text="✅ To'lovni tasdiqlash",
+                                callback_data=f"verify_direct_{service_id}_{order_id}"
+                            )]
+                        ])
                     )
-                else:
-                    group_message = await context.bot.send_document(
-                        chat_id=PAYMENT_GROUP_ID,
-                        document=file_id,
-                        caption=group_text
-                    )
+                    return
 
-                confirm_keyboard = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f'approve_{payment_id}'),
-                        InlineKeyboardButton("❌ Rad etish", callback_data=f'reject_{payment_id}')
-                    ]
-                ])
-
-                await context.bot.send_message(
-                    chat_id=PAYMENT_GROUP_ID,
-                    text="To'lovni tasdiqlaysizmi?",
-                    reply_markup=confirm_keyboard
-                )
-
-                db.update_payment_group_message(payment_id, group_message.message_id)
-
-    except Exception as e:
-        logger.error(f"Avto tekshiruvda xato: {e}")
-        await update.message.reply_text(
-            "⚠️ Avtomatik tekshirishda xato. Admin tekshiruviga yuborildi."
-        )
-
-    context.user_data['state'] = None
-
-async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """To'lovni tasdiqlash (admin)"""
-    query = update.callback_query
-    await query.answer()
-
-    if not await is_admin(query.from_user.id):
-        await query.answer("❌ Sizga ruxsat yo'q!", show_alert=True)
-        return
-
-    payment_id = int(query.data.split('_')[1])
-    payment = db.get_payment(payment_id)
-
-    if not payment:
-        await query.edit_message_text("❌ To'lov topilmadi.")
-        return
-
-    db.approve_payment(payment_id, query.from_user.id)
-    await payment_service.confirm_payment(payment['order_number'])
-
-    user_lang = get_user_lang(payment['user_id'])
-    try:
-        await context.bot.send_message(
-            chat_id=payment['user_id'],
-            text=get_text(user_lang, "payment_approved")
-        )
-    except Exception as e:
-        logger.error(f"Xabar yuborishda xato: {e}")
-
-    await query.edit_message_text(
-        f"✅ To'lov tasdiqlandi!\n\n📋 Buyurtma: #{payment['order_number']}\n💰 Summa: {payment['amount']:,.0f} so'm"
+    # Oddiy start
+    await message.answer(
+        WELCOME_MESSAGE,
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML"
     )
 
-async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """To'lovni rad etish (admin)"""
-    query = update.callback_query
-    await query.answer()
 
-    if not await is_admin(query.from_user.id):
-        await query.answer("❌ Sizga ruxsat yo'q!", show_alert=True)
-        return
+# ============================================
+# MAIN MENU HANDLERS
+# ============================================
 
-    payment_id = int(query.data.split('_')[1])
-    payment = db.get_payment(payment_id)
-
-    if not payment:
-        await query.edit_message_text("❌ To'lov topilmadi.")
-        return
-
-    db.reject_payment(payment_id)
-
-    user_lang = get_user_lang(payment['user_id'])
-    try:
-        await context.bot.send_message(
-            chat_id=payment['user_id'],
-            text=get_text(user_lang, "payment_rejected")
-        )
-    except Exception as e:
-        logger.error(f"Xabar yuborishda xato: {e}")
-
-    await query.edit_message_text(
-        f"❌ To'lov rad etildi!\n\n📋 Buyurtma: #{payment['order_number']}\n💰 Summa: {payment['amount']:,.0f} so'm"
+@dp.message(F.text == "💳 To'lov tasdiqlash")
+async def payment_verify(message: Message):
+    """To'lov tasdiqlash bosilganda"""
+    await message.answer(
+        "📋 <b>Quyidagi xizmatlardan birini tanlang</b>
+"
+        "yoki shaxsiy chekni tekshiring:",
+        reply_markup=get_services_keyboard(),
+        parse_mode="HTML"
     )
 
-# ========== MEN HAQIMDA ==========
 
-async def about_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Men haqimda"""
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    lang = get_user_lang(user_id)
-
-    sites = db.get_user_sites(user_id)
-
-    if not sites:
-        text = "📭 Hali ro'yxatdan o'tgan saytlar mavjud emas."
-    else:
-        text = "👤 Sizning saytlaringiz:\n\n"
-        for i, site in enumerate(sites, 1):
-            text += f"{i}. {site['site_name']}\n"
-            text += f" 🔗 {site['site_url']}\n"
-            text += f" 👤 Login: {site['login']}\n"
-            text += f" 🔑 Parol: {site['password']}\n\n"
-
-    keyboard = [[InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ========== TO'LOVLAR TARIXI ==========
-
-async def payment_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(F.text == "📋 To'lovlar tarixi")
+async def payment_history(message: Message):
     """To'lovlar tarixi"""
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    lang = get_user_lang(user_id)
-
-    payments = db.get_user_payments(user_id)
+    from database import get_db
+    conn = await get_db()
+    payments = await conn.fetch(
+        """SELECT * FROM payments 
+           WHERE user_id = $1 
+           ORDER BY created_at DESC LIMIT 10""",
+        message.from_user.id
+    )
+    await conn.close()
 
     if not payments:
-        text = get_text(lang, "no_history")
-    else:
-        text = "📋 To'lovlar tarixi:\n\n"
-        for payment in payments:
-            status = "✅ Tasdiqlandi" if payment['status'] == 'approved' else \
-                "⏳ Kutilmoqda" if payment['status'] == 'pending' else "❌ Rad etildi"
-            auto = "🤖 Avto" if payment.get('approved_by') == 0 else "👤 Admin"
-            text += f"📋 #{payment['order_number']} - {payment['amount']:,.0f} so'm\n"
-            text += f" 📅 {payment['created_at'].strftime('%d.%m.%Y %H:%M')}\n"
-            text += f" 📊 {status} ({auto})\n\n"
-
-    keyboard = [[InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ========== SOZLAMALAR ==========
-
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sozlamalar"""
-    query = update.callback_query
-    await query.answer()
-
-    lang = get_user_lang(query.from_user.id)
-
-    keyboard = [
-        [InlineKeyboardButton(get_button(lang, "change_language"), callback_data='change_language')],
-        [InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]
-    ]
-
-    await query.edit_message_text(
-        "⚙️ Sozlamalar:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def change_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tilni o'zgartirish"""
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = []
-    for code, name in LANGUAGES.items():
-        keyboard.append([InlineKeyboardButton(name, callback_data=f'lang_{code}')])
-
-    keyboard.append([InlineKeyboardButton("⬅️ Orqaga", callback_data='settings')])
-
-    await query.edit_message_text(
-        "🌐 Tilni tanlang / Выберите язык:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tilni saqlash"""
-    query = update.callback_query
-    await query.answer()
-
-    lang_code = query.data.split('_')[1]
-    db.update_language(query.from_user.id, lang_code)
-
-    await query.edit_message_text(
-        get_text(lang_code, "language_changed"),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(get_button(lang_code, "back"), callback_data='back_main')]
-        ])
-    )
-
-# ========== BOT HAQIDA ==========
-
-async def about_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Bot haqida"""
-    query = update.callback_query
-    await query.answer()
-
-    lang = get_user_lang(query.from_user.id)
-
-    about_text = db.get_setting('about_text') or "Bot haqida ma'lumot"
-    about_media = db.get_setting('about_media')
-
-    keyboard = [[InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if about_media:
-        try:
-            await query.message.delete()
-            await context.bot.send_photo(
-                chat_id=query.message.chat_id,
-                photo=about_media,
-                caption=about_text,
-                reply_markup=reply_markup
-            )
-            return
-        except:
-            pass
-
-    await query.edit_message_text(about_text, reply_markup=reply_markup)
-
-# ========== SAVOLLAR ==========
-
-async def questions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Savollar"""
-    query = update.callback_query
-    await query.answer()
-
-    lang = get_user_lang(query.from_user.id)
-
-    questions_text = db.get_setting('questions_text') or 'Savollaringiz bormi?'
-    contact = db.get_setting('contact_admin') or '@admin'
-
-    text = f"{questions_text}\n\n📞 Admin bilan bog'lanish: {contact}"
-
-    keyboard = [
-        [InlineKeyboardButton(get_button(lang, "contact_admin"), url=f'https://t.me/{contact.replace("@", "")}')],
-        [InlineKeyboardButton(get_button(lang, "back"), callback_data='back_main')]
-    ]
-
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ========== ORQAGA ==========
-
-async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Asosiy menyuga qaytish"""
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    lang = get_user_lang(user.id)
-
-    welcome_text, welcome_links = db.get_welcome_data()
-    text = welcome_text.format(name=user.first_name)
-
-    keyboard = []
-    for link in welcome_links:
-        keyboard.append([InlineKeyboardButton(link['name'], url=link['url'])])
-
-    keyboard.extend([
-        [InlineKeyboardButton(get_button(lang, "payment_confirm"), callback_data='payment_confirm')],
-        [InlineKeyboardButton(get_button(lang, "about_me"), callback_data='about_me'),
-         InlineKeyboardButton(get_button(lang, "payment_history"), callback_data='payment_history')],
-        [InlineKeyboardButton(get_button(lang, "settings"), callback_data='settings'),
-         InlineKeyboardButton(get_button(lang, "about_bot"), callback_data='about_bot')],
-        [InlineKeyboardButton(get_button(lang, "questions"), callback_data='questions')]
-    ])
-
-    if await is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("🔧 Admin panel", callback_data='admin_panel')])
-
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-
-# ========== XABARLAR HANDLERI ==========
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Barcha xabarlarni qayta ishlash"""
-    user_id = update.effective_user.id
-
-    admin_state = context.user_data.get('admin_state')
-    if admin_state and await is_admin(user_id):
-        if admin_state == 'broadcast':
-            await admin_broadcast_send(update, context)
-            return
-        elif admin_state == 'set_welcome':
-            await admin_set_welcome_save(update, context)
-            return
-        elif admin_state == 'set_questions':
-            await admin_set_questions_save(update, context)
-            return
-        elif admin_state == 'set_about':
-            await admin_set_about_save(update, context)
-            return
-
-    state = context.user_data.get('state')
-    if state == STATE_WAITING_ORDER_NUMBER:
-        await process_order_number(update, context)
-    elif state == STATE_WAITING_SCREENSHOT:
-        await process_screenshot(update, context)
-    else:
-        lang = get_user_lang(user_id)
-        await update.message.reply_text(
-            "Iltimos, menyudan tanlang:",
-            reply_markup=get_main_keyboard(lang)
-        )
-
-# ========== ASOSIY FUNKSIYA (WEBHOOK + HEALTH CHECK) ==========
-
-async def telegram_webhook(request):
-    """Telegram webhook updates"""
-    try:
-        data = await request.json()
-        await tg_app.update_queue.put(
-            Update.de_json(data=data, bot=tg_app.bot)
-        )
-        return Response()
-    except Exception as e:
-        logger.error(f"Webhook xato: {e}")
-        return Response(status_code=500)
-
-async def health_check(request):
-    """Render health check"""
-    return PlainTextResponse(
-        content=json.dumps({
-            "status": "healthy",
-            "service": "telegram-payment-bot",
-            "timestamp": str(datetime.now()),
-            "webhook": webhook_url
-        }),
-        status_code=200
-    )
-
-async def root(request):
-    """Root endpoint"""
-    return PlainTextResponse(
-        content="🤖 Telegram Payment Bot ishlayapti!",
-        status_code=200
-    )
-
-# Global variables
-tg_app = None
-webhook_url = ""
-
-def main():
-    """Botni ishga tushirish (Webhook + Health Check)"""
-    global tg_app, webhook_url
-
-    # Bot application
-    tg_app = Application.builder().token(BOT_TOKEN).build()
-
-    # Komandalar
-    tg_app.add_handler(CommandHandler("start", start))
-    tg_app.add_handler(CommandHandler("admin", admin_panel))
-
-    # Callback query handlerlar
-    tg_app.add_handler(CallbackQueryHandler(payment_confirm_start, pattern='^payment_confirm$'))
-    tg_app.add_handler(CallbackQueryHandler(process_site_selection, pattern='^site_'))
-    tg_app.add_handler(CallbackQueryHandler(about_me, pattern='^about_me$'))
-    tg_app.add_handler(CallbackQueryHandler(payment_history, pattern='^payment_history$'))
-    tg_app.add_handler(CallbackQueryHandler(settings, pattern='^settings$'))
-    tg_app.add_handler(CallbackQueryHandler(change_language, pattern='^change_language$'))
-    tg_app.add_handler(CallbackQueryHandler(set_language, pattern='^lang_'))
-    tg_app.add_handler(CallbackQueryHandler(about_bot, pattern='^about_bot$'))
-    tg_app.add_handler(CallbackQueryHandler(questions, pattern='^questions$'))
-    tg_app.add_handler(CallbackQueryHandler(back_to_main, pattern='^back_main$'))
-
-    # Admin handlerlar
-    tg_app.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_stats, pattern='^admin_stats$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_broadcast_start, pattern='^admin_broadcast$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_report, pattern='^admin_report$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_daily_report, pattern='^report_daily$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_weekly_report, pattern='^report_weekly$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_set_welcome_start, pattern='^admin_set_welcome$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_set_questions_start, pattern='^admin_set_questions$'))
-    tg_app.add_handler(CallbackQueryHandler(admin_set_about_start, pattern='^admin_set_about$'))
-
-    # To'lov tasdiqlash/rad etish
-    tg_app.add_handler(CallbackQueryHandler(approve_payment, pattern='^approve_'))
-    tg_app.add_handler(CallbackQueryHandler(reject_payment, pattern='^reject_'))
-
-    # Xabarlar
-    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    tg_app.add_handler(MessageHandler(filters.PHOTO, handle_message))
-    tg_app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
-    tg_app.add_handler(MessageHandler(filters.VIDEO, handle_message))
-
-    # Webhook sozlamalari
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
-    PORT_STR = os.environ.get("PORT", "10000")
-    PORT = int(PORT_STR) if PORT_STR and PORT_STR.strip() else 10000
-    WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "D1yoRBeK")
-
-    # Fallback for local testing
-    if not WEBHOOK_URL and not RENDER_EXTERNAL_URL:
-        print("⚠️ WEBHOOK_URL va RENDER_EXTERNAL_URL o'rnatilmagan!")
-        print("🔄 Polling mode'ga o'tilmoqda...")
-        tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
+        await message.answer("📭 Sizda hali to'lovlar tarixi yo'q.")
         return
 
-    webhook_url = WEBHOOK_URL or f"{RENDER_EXTERNAL_URL}/telegram"
+    text = "📋 <b>Sizning to'lovlaringiz:</b>
 
-    # Starlette app
-    starlette_app = Starlette(
-        routes=[
-            Route("/telegram", telegram_webhook, methods=["POST"]),
-            Route("/health", health_check, methods=["GET"]),
-            Route("/", root, methods=["GET"]),
-        ]
+"
+    for i, payment in enumerate(payments, 1):
+        status_emoji = {
+            'pending': '⏳',
+            'verified': '✅',
+            'rejected': '❌',
+            'auto_verified': '✅🤖'
+        }.get(payment['status'], '❓')
+
+        text += (
+            f"{i}. {status_emoji} #{payment['id']}
+"
+            f"   💰 {payment['amount']:,.0f} UZS
+"
+            f"   📅 {payment['created_at'].strftime('%d.%m.%Y %H:%M')}
+
+"
+        )
+
+    await message.answer(text, parse_mode="HTML")
+
+
+@dp.message(F.text == "ℹ️ Bot haqida")
+async def about_bot(message: Message):
+    """Bot haqida"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏢 Biznes Integratsiya", callback_data="business_integration")],
+        [InlineKeyboardButton(text="📞 Admin bilan bog'lanish", url="https://t.me/admin_username")]
+    ])
+
+    await message.answer(
+        ABOUT_MESSAGE,
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
 
-    async def run_bot():
-        """Botni ishga tushirish"""
-        print("🤖 Bot ishga tushdi...")
-        print(f"🔗 Webhook URL: {webhook_url}")
-        print(f"📡 Port: {PORT}")
-        print(f"🏥 Health Check: http://0.0.0.0:{PORT}/health")
-        print("🔍 Avtomatik screen shot tekshiruvi yoqildi!")
 
-        await tg_app.bot.set_webhook(
-            url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            allowed_updates=Update.ALL_TYPES
-        )
+@dp.message(F.text == "❓ Yordam")
+async def help_command(message: Message):
+    """Yordam"""
+    await message.answer(HELP_MESSAGE, parse_mode="HTML")
 
-        async with tg_app:
-            await tg_app.start()
-            # Bot ishlayotganini kutish
-            while True:
-                await asyncio.sleep(3600)
 
-    # Web server
-    webserver = uvicorn.Server(
-        config=uvicorn.Config(
-            app=starlette_app,
-            host="0.0.0.0",
-            port=PORT,
-            use_colors=False,
-        )
+# ============================================
+# SERVICE SELECTION (Sayt/Bot)
+# ============================================
+
+@dp.callback_query(F.data.startswith("service_"))
+async def service_selected(callback: CallbackQuery, state: FSMContext):
+    """Xizmat (sayt yoki bot) tanlanganda"""
+    parts = callback.data.split("_")
+    service_type = parts[1]  # website yoki bot
+    service_id = int(parts[2])
+
+    service = await get_service_by_id(service_id)
+
+    if not service:
+        await callback.answer("Xizmat topilmadi!")
+        return
+
+    await state.update_data(
+        service_id=service_id,
+        service_type=service_type,
+        service_name=service['name']
     )
 
-    # Ikkisini parallel ishga tushirish
-    async def main_async():
-        await asyncio.gather(
-            run_bot(),
-            webserver.serve()
+    await callback.message.edit_text(
+        f"🌐 <b>{service['name']}</b>
+
+"
+        f"Buyurtma raqamini kiriting:
+"
+        f"(Masalan: <code>ORD-12345</code>)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Orqaga", callback_data="back_services")]
+        ]),
+        parse_mode="HTML"
+    )
+
+    await state.set_state(PaymentStates.waiting_order_number)
+    await callback.answer()
+
+
+@dp.message(PaymentStates.waiting_order_number)
+async def process_order_number(message: Message, state: FSMContext):
+    """Buyurtma raqami kiritilganda"""
+    order_number = message.text.strip().upper()
+    data = await state.get_data()
+
+    service_id = data['service_id']
+    service_type = data['service_type']
+    service_name = data['service_name']
+
+    await message.answer("⏳ Tekshirilmoqda...")
+
+    # Tekshirish
+    if service_type == 'website':
+        result = await verify_site_payment(service_id, order_number)
+    else:
+        result = await verify_bot_payment(service_id, order_number)
+
+    if result.get('found'):
+        # To'lov topildi
+        await state.update_data(
+            order_number=order_number,
+            amount=result.get('amount', 0),
+            verification_method='api'
         )
 
-    asyncio.run(main_async())
+        await message.answer(
+            f"✅ <b>Buyurtma topildi!</b>
+
+"
+            f"📦 Xizmat: {service_name}
+"
+            f"🔢 Buyurtma: <code>#{order_number}</code>
+"
+            f"💰 Summa: {result['amount']:,.0f} UZS
+"
+            f"📊 Status: {result.get('status', 'N/A')}
+
+"
+            f"Tasdiqlash uchun to'lov screenshotini yuboring:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_payment")]
+            ]),
+            parse_mode="HTML"
+        )
+
+        await state.set_state(PaymentStates.waiting_screenshot)
+    else:
+        # To'lov topilmadi
+        await message.answer(
+            f"❌ <b>Buyurtma #{order_number} topilmadi.</b>
+
+"
+            f"Iltimos, raqamni tekshirib qayta kiriting yoki "
+            f"shaxsiy chek orqali tekshiring.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Qayta urinish", callback_data=f"service_{service_type}_{service_id}")],
+                [InlineKeyboardButton(text="📄 Shaxsiy chek", callback_data="personal_receipt")]
+            ]),
+            parse_mode="HTML"
+        )
+        await state.clear()
+
+
+# ============================================
+# DIRECT VERIFICATION (Deep link orqali)
+# ============================================
+
+@dp.callback_query(F.data.startswith("verify_direct_"))
+async def direct_verify(callback: CallbackQuery, state: FSMContext):
+    """Deep link orqali to'lovni tasdiqlash"""
+    parts = callback.data.split("_")
+    service_id = int(parts[2])
+    order_id = parts[3]
+
+    service = await get_service_by_id(service_id)
+
+    if not service:
+        await callback.answer("Xizmat topilmadi!")
+        return
+
+    await state.update_data(
+        service_id=service_id,
+        service_type=service['type'],
+        service_name=service['name'],
+        order_number=order_id
+    )
+
+    await callback.message.edit_text(
+        f"🔗 <b>{service['name']}</b>
+
+"
+        f"📦 Buyurtma: <code>#{order_id}</code>
+
+"
+        f"To'lovni tasdiqlash uchun screenshot yuboring:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_payment")]
+        ]),
+        parse_mode="HTML"
+    )
+
+    await state.set_state(PaymentStates.waiting_screenshot)
+    await callback.answer()
+
+
+# ============================================
+# PERSONAL RECEIPT
+# ============================================
+
+@dp.callback_query(F.data == "personal_receipt")
+async def personal_receipt_start(callback: CallbackQuery, state: FSMContext):
+    """Shaxsiy chek tekshiruvi boshlandi"""
+    await state.update_data(service_type='personal', service_id=None)
+
+    await callback.message.edit_text(
+        "📄 <b>Shaxsiy Chek Tekshiruvi</b>
+
+"
+        "To'lov tizimini tanlang:",
+        reply_markup=get_receipt_type_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("receipt_"))
+async def receipt_type_selected(callback: CallbackQuery, state: FSMContext):
+    """Chek turi tanlanganda"""
+    receipt_type = callback.data.replace("receipt_", "")
+
+    await state.update_data(receipt_type=receipt_type)
+
+    type_name = RECEIPT_TYPES.get(receipt_type, 'Chek')
+
+    await callback.message.edit_text(
+        f"{type_name} tanlandi.
+
+"
+        f"Iltimos, to'lov screenshotini yuboring "
+        f"yoki chek raqamini kiriting:
+
+"
+        f"<i>Masalan: CK1234567890</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Orqaga", callback_data="back_receipt_types")]
+        ]),
+        parse_mode="HTML"
+    )
+
+    await state.set_state(PaymentStates.waiting_screenshot)
+    await callback.answer()
+
+
+@dp.message(PaymentStates.waiting_screenshot)
+async def process_screenshot(message: Message, state: FSMContext):
+    """Screenshot qabul qilindi"""
+    data = await state.get_data()
+
+    # Screenshot yoki chek raqami
+    receipt_screenshot = None
+    receipt_number = None
+
+    if message.photo:
+        photo = message.photo[-1]  # Eng yuqori sifatli
+        receipt_screenshot = photo.file_id
+    elif message.text:
+        receipt_number = message.text.strip()
+    else:
+        await message.answer("❌ Iltimos, screenshot yoki chek raqamini yuboring.")
+        return
+
+    # To'lovni saqlash
+    payment_id = await create_payment(
+        user_id=message.from_user.id,
+        user_username=message.from_user.username,
+        service_type=data.get('service_type', 'personal'),
+        service_id=data.get('service_id'),
+        order_number=data.get('order_number'),
+        amount=data.get('amount', 0),
+        receipt_type=data.get('receipt_type'),
+        receipt_number=receipt_number,
+        receipt_screenshot=receipt_screenshot,
+        verification_method='screenshot'
+    )
+
+    # Admin ga yuborish
+    await send_payment_to_admins(payment_id, message.from_user.id)
+
+    await message.answer(
+        "✅ <b>Screenshot qabul qilindi!</b>
+
+"
+        "⏳ Admin tekshiruviga yuborildi.
+"
+        "Natija tez orada xabar qilinadi.",
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML"
+    )
+
+    await state.clear()
+
+
+async def send_payment_to_admins(payment_id: int, user_id: int):
+    """To'lovni adminlarga yuborish"""
+    from database import get_payment_by_id
+    payment = await get_payment_by_id(payment_id)
+
+    if not payment:
+        return
+
+    service = await get_service_by_id(payment['service_id']) if payment['service_id'] else None
+    service_name = service['name'] if service else "Shaxsiy chek"
+
+    text = f"""
+📋 <b>Yangi To'lov #{payment['id']}</b>
+
+👤 User: @{payment['user_username'] or user_id}
+🏪 Xizmat: {service_name}
+🔢 Buyurtma: {payment['order_number'] or 'N/A'}
+💰 Summa: {payment['amount']:,.0f} UZS
+📄 Chek turi: {payment['receipt_type'] or 'N/A'}
+📅 Sana: {payment['created_at'].strftime('%Y-%m-%d %H:%M')}
+"""
+
+    for admin_id in ADMIN_IDS:
+        try:
+            if payment['receipt_screenshot']:
+                await bot.send_photo(
+                    admin_id,
+                    photo=payment['receipt_screenshot'],
+                    caption=text,
+                    reply_markup=get_payment_action_keyboard(payment['id'])
+                )
+            else:
+                await bot.send_message(
+                    admin_id,
+                    text,
+                    reply_markup=get_payment_action_keyboard(payment['id']),
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error(f"Admin {admin_id} ga xabar yuborishda xatolik: {e}")
+
+
+# ============================================
+# BUSINESS INTEGRATION
+# ============================================
+
+@dp.callback_query(F.data == "business_integration")
+async def business_integration(callback: CallbackQuery):
+    """Biznes integratsiya bo'limi"""
+    await callback.message.edit_text(
+        BUSINESS_INTEGRATION_MESSAGE,
+        reply_markup=get_business_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "connect_website")
+async def connect_website_info(callback: CallbackQuery):
+    """Sayt ulash bo'limi"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 API Dokumentatsiya", callback_data="api_docs")],
+        [InlineKeyboardButton(text="📝 Ariza yuborish", callback_data="apply_business")],
+        [InlineKeyboardButton(text="◀️ Orqaga", callback_data="business_integration")]
+    ])
+
+    await callback.message.edit_text(
+        "🌐 <b>Sayt Ulanishi</b>
+
+"
+        "<b>Kerakli qadamlar:</b>
+
+"
+        "1️⃣ <b>Ariza yuboring</b>
+"
+        "   • Sayt nomi va URL
+"
+        "   • Biznes ma'lumotlari
+
+"
+        "2️⃣ <b>API kalit oling</b>
+"
+        "   • Xavfsiz kalit beriladi
+"
+        "   • Endpoint ma'lumotlari
+
+"
+        "3️⃣ <b>Kod qo'shing</b>
+"
+        "   • Python/PHP/Node.js namunalari
+"
+        "   • Webhook sozlash
+
+"
+        "4️⃣ <b>Test qiling</b>
+"
+        "   • Test to'lov yuboring
+"
+        "   • Tekshiruvni sinang
+
+"
+        "<b>API Endpoints:</b>
+"
+        "• POST /api/payments/verify
+"
+        "• GET /api/payments/status
+"
+        "• POST /webhook/payment-status",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "connect_bot")
+async def connect_bot_info(callback: CallbackQuery):
+    """Bot ulash bo'limi"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Kod Namunasi", callback_data="bot_code_sample")],
+        [InlineKeyboardButton(text="📝 Ariza yuborish", callback_data="apply_business")],
+        [InlineKeyboardButton(text="◀️ Orqaga", callback_data="business_integration")]
+    ])
+
+    await callback.message.edit_text(
+        "🤖 <b>Telegram Bot Ulanishi</b>
+
+"
+        "<b>Kerakli qadamlar:</b>
+
+"
+        "1️⃣ <b>Ariza yuboring</b>
+"
+        "   • Bot username (@botname)
+"
+        "   • Bot token
+"
+        "   • Biznes ma'lumotlari
+
+"
+        "2️⃣ <b>Deep Link sozlang</b>
+"
+        "   <code>https://t.me/ourbot?start=service_{ID}_order_{ORDER}</code>
+
+"
+        "3️⃣ <b>Webhook qabul qiling</b>
+"
+        "   • /webhook/payment endpoint
+"
+        "   • JSON formatda status
+
+"
+        "4️⃣ <b>Test qiling</b>
+"
+        "   • Test buyurtma yuboring
+"
+        "   • Deep link orqali o'ting
+
+"
+        "<b>Deep Link Format:</b>
+"
+        "<code>t.me/ourbot?start=service_5_order_12345</code>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "benefits")
+async def show_benefits(callback: CallbackQuery):
+    """Nima olasiz?"""
+    await callback.message.edit_text(
+        "📊 <b>Biznes Integratsiya - Nima olasiz?</b>
+
+"
+        "✅ <b>Avtomatik to'lov tasdiqlash</b>
+"
+        "   Mijozlar to'lovini avtomatik tekshiring
+
+"
+        "✅ <b>Screenshot tekshiruvi</b>
+"
+        "   Mijozlar screenshot yuborsa, admin tekshiradi
+
+"
+        "✅ <b>Statistika va hisobotlar</b>
+"
+        "   Real vaqt statistikasi va to'liq hisobotlar
+
+"
+        "✅ <b>24/7 qo'llab-quvvatlash</b>
+"
+        "   Bot to'xtamay ishlaydi
+
+"
+        "✅ <b>Minimal komissiya</b>
+"
+        "   Eng arzon narxlar
+
+"
+        "✅ <b>Webhook xabarlar</b>
+"
+        "   To'lov statusi o'zgarganda avtomatik xabar
+
+"
+        "✅ <b>Deep Link integratsiya</b>
+"
+        "   Telegram botlar uchun oson ulanish",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Ariza yuborish", callback_data="apply_business")],
+            [InlineKeyboardButton(text="◀️ Orqaga", callback_data="business_integration")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "apply_business")
+async def apply_business_start(callback: CallbackQuery, state: FSMContext):
+    """Biznes arizasi boshlandi"""
+    await callback.message.edit_text(
+        "📝 <b>Biznes Ariza</b>
+
+"
+        "Biznes nomini kiriting:
+"
+        "(Masalan: MyShop.uz)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Bekor qilish", callback_data="business_integration")]
+        ]),
+        parse_mode="HTML"
+    )
+    await state.set_state(PaymentStates.waiting_business_name)
+    await callback.answer()
+
+
+@dp.message(PaymentStates.waiting_business_name)
+async def process_business_name(message: Message, state: FSMContext):
+    """Biznes nomi kiritildi"""
+    await state.update_data(business_name=message.text.strip())
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Sayt", callback_data="biz_type_website")],
+        [InlineKeyboardButton(text="🤖 Telegram Bot", callback_data="biz_type_bot")],
+        [InlineKeyboardButton(text="◀️ Orqaga", callback_data="apply_business")]
+    ])
+
+    await message.answer(
+        "Biznes turini tanlang:",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data.startswith("biz_type_"))
+async def business_type_selected(callback: CallbackQuery, state: FSMContext):
+    """Biznes turi tanlandi"""
+    biz_type = callback.data.replace("biz_type_", "")
+    await state.update_data(business_type=biz_type)
+
+    await callback.message.edit_text(
+        "📞 <b>Aloqa telefon raqamingizni kiriting:</b>
+"
+        "(Masalan: +998901234567)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Orqaga", callback_data="apply_business")]
+        ]),
+        parse_mode="HTML"
+    )
+    await state.set_state(PaymentStates.waiting_contact)
+    await callback.answer()
+
+
+@dp.message(PaymentStates.waiting_contact)
+async def process_contact(message: Message, state: FSMContext):
+    """Aloqa ma'lumotlari kiritildi"""
+    data = await state.get_data()
+
+    request_id = await create_business_request(
+        requester_id=message.from_user.id,
+        requester_username=message.from_user.username,
+        business_name=data['business_name'],
+        business_type=data['business_type'],
+        contact_phone=message.text.strip()
+    )
+
+    # Adminlarga xabar
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"""
+🏢 <b>Yangi Biznes Ariza #{request_id}</b>
+
+🏪 Nomi: {data['business_name']}
+📱 Tur: {'Sayt' if data['business_type'] == 'website' else 'Telegram Bot'}
+👤 Ariza beruvchi: @{message.from_user.username or message.from_user.id}
+📞 Telefon: {message.text.strip()}
+""",
+                reply_markup=get_business_request_keyboard(request_id),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Admin {admin_id} ga xabar yuborishda xatolik: {e}")
+
+    await message.answer(
+        "✅ <b>Arizangiz qabul qilindi!</b>
+
+"
+        f"🏢 Biznes: {data['business_name']}
+"
+        f"📱 Tur: {'Sayt' if data['business_type'] == 'website' else 'Telegram Bot'}
+"
+        f"📞 Aloqa: {message.text.strip()}
+
+"
+        "⏳ Admin tekshiruvidan o'tkazilmoqda.
+"
+        "Natija tez orada xabar qilinadi.",
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML"
+    )
+
+    await state.clear()
+
+
+# ============================================
+# BACK BUTTONS
+# ============================================
+
+@dp.callback_query(F.data == "back_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    """Asosiy menyuga qaytish"""
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer(
+        "Asosiy menyu:",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_services")
+async def back_to_services(callback: CallbackQuery, state: FSMContext):
+    """Xizmatlar ro'yxatiga qaytish"""
+    await state.clear()
+    await callback.message.edit_text(
+        "📋 <b>Quyidagi xizmatlardan birini tanlang</b>
+"
+        "yoki shaxsiy chekni tekshiring:",
+        reply_markup=get_services_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_about")
+async def back_to_about(callback: CallbackQuery):
+    """Bot haqida qismiga qaytish"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏢 Biznes Integratsiya", callback_data="business_integration")],
+        [InlineKeyboardButton(text="📞 Admin bilan bog'lanish", url="https://t.me/admin_username")]
+    ])
+
+    await callback.message.edit_text(
+        ABOUT_MESSAGE,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_receipt_types")
+async def back_to_receipt_types(callback: CallbackQuery, state: FSMContext):
+    """Chek turlariga qaytish"""
+    await callback.message.edit_text(
+        "📄 <b>Shaxsiy Chek Tekshiruvi</b>
+
+"
+        "To'lov tizimini tanlang:",
+        reply_markup=get_receipt_type_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "cancel_payment")
+async def cancel_payment(callback: CallbackQuery, state: FSMContext):
+    """To'lovni bekor qilish"""
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ To'lov bekor qilindi.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Qayta boshlash", callback_data="back_services")]
+        ])
+    )
+    await callback.answer("Bekor qilindi!")
+
+
+# ============================================
+# ADMIN PANEL
+# ============================================
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    """Admin paneli"""
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Sizda ruxsat yo'q!")
+        return
+
+    await message.answer(
+        "🔧 <b>Admin Paneli</b>",
+        reply_markup=get_admin_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    """Admin statistika"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    await show_stats(callback.message)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_pending_payments")
+async def admin_pending(callback: CallbackQuery):
+    """Kutilayotgan to'lovlar"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    await show_pending_payments(callback.message, bot)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_business_requests")
+async def admin_business(callback: CallbackQuery):
+    """Biznes arizalari"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    await show_business_requests(callback.message)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_approve_"))
+async def admin_approve(callback: CallbackQuery):
+    """Admin to'lovni tasdiqlash"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    payment_id = int(callback.data.split("_")[2])
+    await approve_payment(callback, bot, payment_id)
+
+
+@dp.callback_query(F.data.startswith("admin_reject_"))
+async def admin_reject(callback: CallbackQuery):
+    """Admin to'lovni rad etish"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    payment_id = int(callback.data.split("_")[2])
+    await reject_payment(callback, bot, payment_id)
+
+
+@dp.callback_query(F.data.startswith("biz_approve_"))
+async def biz_approve(callback: CallbackQuery):
+    """Biznes arizasini tasdiqlash"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    request_id = int(callback.data.split("_")[2])
+    await approve_business_request(callback, request_id)
+
+
+@dp.callback_query(F.data.startswith("biz_reject_"))
+async def biz_reject(callback: CallbackQuery):
+    """Biznes arizasini rad etish"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!")
+        return
+
+    request_id = int(callback.data.split("_")[2])
+    await reject_business_request(callback, request_id)
+
+
+# ============================================
+# MAIN
+# ============================================
+
+async def main():
+    """Botni ishga tushirish"""
+    # Database init
+    await init_db()
+    logger.info("Database initialized!")
+
+    # Polling
+    logger.info("Bot started!")
+    await dp.start_polling(bot)
+
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
