@@ -1,4 +1,3 @@
-
 """
 bot.py - Asosiy Telegram Bot
 Universal To'lov Boti v2.0
@@ -733,12 +732,54 @@ async def biz_reject(callback: CallbackQuery):
     await reject_business_request(callback, request_id)
 
 
-async def main():
+# ==================== WEBHOOK + HEALTH CHECK ====================
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+import os
+
+PORT = int(os.getenv("PORT", "10000"))
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+WEBHOOK_PATH = f"/webhook/{os.getenv('WEBHOOK_SECRET', 'secret')}"
+
+async def health_handler(request):
+    """Render health check"""
+    return web.json_response({"status": "ok", "bot": "running"})
+
+async def on_startup(app):
+    """Bot ishga tushganda webhook sozlash"""
     await init_db()
     logger.info("Database initialized!")
-    logger.info("Bot started!")
-    await dp.start_polling(bot)
+
+    if RENDER_URL:
+        webhook_url = f"{RENDER_URL}{WEBHOOK_PATH}"
+        await bot.set_webhook(webhook_url, drop_pending_updates=True)
+        logger.info(f"Webhook set: {webhook_url}")
+    else:
+        logger.warning("RENDER_EXTERNAL_URL not set, webhook not configured!")
+
+async def on_shutdown(app):
+    """Bot to'xtaganda"""
+    await bot.delete_webhook()
+    logger.info("Webhook deleted, bot stopped")
+
+def main():
+    app = web.Application()
+
+    # Health check
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    # Webhook handler
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+
+    # Startup/shutdown
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    logger.info(f"Starting webhook server on port {PORT}")
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    main()
