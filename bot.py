@@ -739,28 +739,32 @@ import os
 
 PORT = int(os.getenv("PORT", "10000"))
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
-WEBHOOK_PATH = f"/webhook/{os.getenv('WEBHOOK_SECRET', 'secret')}"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
+WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
 
 async def health_handler(request):
     """Render health check"""
-    return web.json_response({"status": "ok", "bot": "running"})
+    return web.json_response({"status": "ok", "bot": "running", "webhook": WEBHOOK_PATH})
 
 async def on_startup(app):
     """Bot ishga tushganda webhook sozlash"""
     await init_db()
     logger.info("Database initialized!")
 
+    webhook_url = ""
     if RENDER_URL:
         webhook_url = f"{RENDER_URL}{WEBHOOK_PATH}"
+    else:
+        # Render ba'zan RENDER_EXTERNAL_URL bermaydi, manual URL
+        service_name = os.getenv("RENDER_SERVICE_NAME", "")
+        if service_name:
+            webhook_url = f"https://{service_name}.onrender.com{WEBHOOK_PATH}"
+
+    if webhook_url:
         await bot.set_webhook(webhook_url, drop_pending_updates=True)
         logger.info(f"Webhook set: {webhook_url}")
     else:
-        logger.warning("RENDER_EXTERNAL_URL not set, webhook not configured!")
-
-async def on_shutdown(app):
-    """Bot to'xtaganda"""
-    await bot.delete_webhook()
-    logger.info("Webhook deleted, bot stopped")
+        logger.error("NO WEBHOOK URL! Set RENDER_EXTERNAL_URL env var!")
 
 def main():
     app = web.Application()
@@ -773,11 +777,11 @@ def main():
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path=WEBHOOK_PATH)
 
-    # Startup/shutdown
+    # Startup
     app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
 
     logger.info(f"Starting webhook server on port {PORT}")
+    logger.info(f"Webhook path: {WEBHOOK_PATH}")
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 
