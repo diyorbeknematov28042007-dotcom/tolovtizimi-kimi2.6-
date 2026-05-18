@@ -278,17 +278,17 @@ async def update_business_request_status(request_id: int, status: str, admin_not
 async def get_or_create_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None):
     """Foydalanuvchini olish yoki yaratish"""
     conn = await get_db()
-    user = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", user_id)
 
     if not user:
         await conn.execute("""
-            INSERT INTO users (id, username, first_name, last_name)
+            INSERT INTO users (telegram_id, username, first_name, last_name)
             VALUES ($1, $2, $3, $4)
         """, user_id, username, first_name, last_name)
     else:
         await conn.execute("""
             UPDATE users SET username = $1, first_name = $2, last_name = $3, last_active = NOW()
-            WHERE id = $4
+            WHERE telegram_id = $4
         """, username, first_name, last_name, user_id)
 
     await conn.close()
